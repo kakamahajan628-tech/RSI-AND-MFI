@@ -17,8 +17,13 @@ logging.basicConfig(
     stream=sys.stdout
 )
 
-TOKEN = os.getenv("TELEGRAM_TOKEN")
-USER_CHAT_ID = os.getenv("USER_CHAT_ID")  # Aapki chat ID jahan startup message jayega
+# ==================== APNI DETAILS YAHAN DALO ====================
+# 1. 'YOUR_BOT_TOKEN_HERE' ko hatao aur apna BotFather waala Token likho (single quotes ke andar)
+TOKEN = "YOUR_BOT_TOKEN_HERE"
+
+# 2. YOUR_CHAT_ID_HERE ko hatao aur apna @userinfobot se mila hua 9-10 digits ka number likho (bina quotes ke)
+USER_CHAT_ID = YOUR_CHAT_ID_HERE
+# ===================================================================
 
 # Initialize exchanges safely
 EXCHANGES = []
@@ -69,7 +74,7 @@ async def send_startup_message(application: Application):
         except Exception as e:
             logging.error(f"Could not send startup message: {e}. Make sure you have started the bot in Telegram.")
     else:
-        logging.warning("USER_CHAT_ID missing in environment variables. Skipping startup message.")
+        logging.warning("USER_CHAT_ID missing in code. Skipping startup message.")
 
 # Telegram Command Handlers
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -162,8 +167,9 @@ def run_web_server():
     app.run(host='0.0.0.0', port=port)
 
 def main():
-    if not TOKEN:
-        logging.error("CRITICAL: TELEGRAM_TOKEN variable missing completely.")
+    # Token validate check
+    if not TOKEN or TOKEN == "YOUR_BOT_TOKEN_HERE":
+        logging.error("CRITICAL: Please hardcode your real Telegram Token inside the script.")
         sys.exit(1)
         
     logging.info("Initializing Telegram bot framework...")
