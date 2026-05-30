@@ -65,7 +65,7 @@ async def send_startup_message(application: Application):
             await asyncio.sleep(3) # Stable connection ke liye thoda pause
             await application.bot.send_message(
                 chat_id=USER_CHAT_ID,
-                text="🚀 *Bot started successfully!* Ready to track RSI and MFI.\nUse `/track COIN/USDT` to start.",
+                text="🚀 *Bot started successfully!* Ready to track RSI and MFI matrix.\nUse `/track COIN/USDT` to start.",
                 parse_mode="Markdown"
             )
             logging.info(f"Startup message sent to chat ID: {USER_CHAT_ID}")
@@ -77,7 +77,7 @@ async def send_startup_message(application: Application):
 # Telegram Command Handlers
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "⚡ *RSI/MFI Tracker Active*\n\n"
+        "⚡ *RSI/MFI Matrix Tracker Active*\n\n"
         "Commands:\n"
         "`/track BTC/USDT` - Start tracking a pair\n"
         "`/stop BTC/USDT` - Stop tracking a pair\n"
@@ -95,7 +95,7 @@ async def track_coin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         TRACKED_PAIRS[chat_id] = set()
     TRACKED_PAIRS[chat_id].add(symbol)
     logging.info(f"Started tracking {symbol} for chat {chat_id}")
-    await update.message.reply_text(f"✅ Now tracking *{symbol}* across 5m, 15m, 1h, and 4h intervals.", parse_mode="Markdown")
+    await update.message.reply_text(f"✅ Now tracking *{symbol}* across 5m, 15m, 1h, and 4h combined matrix.", parse_mode="Markdown")
 
 async def stop_coin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -117,13 +117,19 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else: 
         await update.message.reply_text(f"📋 *Currently Tracking:*\n" + "\n".join([f"• {p}" for p in pairs]), parse_mode="Markdown")
 
-# Background Monitoring Loop
+# Background Monitoring Loop (MODIFIED: Grabs all timeframes into 1 message)
 async def monitoring_job(application: Application):
     logging.info("Background tracking core loop running every 60s...")
     while True:
         await asyncio.sleep(60)
         for chat_id, pairs in list(TRACKED_PAIRS.items()):
             for symbol in list(pairs):
+                timeframe_data = {}
+                trigger_alert = False
+                last_price = 0.0
+                detected_source = "Unknown"
+
+                # 4 alag messages bhejne ke bajay pehle saara data ek sath layenge
                 for tf in TIMEFRAMES:
                     try:
                         ohlcv, used_exchange = fetch_ohlcv_with_fallback(symbol, tf)
@@ -132,6 +138,7 @@ async def monitoring_job(application: Application):
                         last_candle = calculate_indicators(ohlcv)
                         if last_candle is None:
                             continue
+                        
                         rsi_val = last_candle['RSI']
                         mfi_val = last_candle['MFI']
                         price = last_candle['close']
@@ -139,19 +146,43 @@ async def monitoring_job(application: Application):
                         if pd.isna(rsi_val) or pd.isna(mfi_val):
                             continue
 
-                        # ALERT CONDITIONS (RSI <= 30 or >= 70 | MFI <= 20 or >= 80)
+                        last_price = price
+                        detected_source = used_exchange
+                        timeframe_data[tf] = (rsi_val, mfi_val)
+
+                        # Agar kisi BHI ek timeframe par condition hit hui, toh poora table bhejenge
                         if rsi_val <= 30 or rsi_val >= 70 or mfi_val <= 20 or mfi_val >= 80:
-                            msg = (
-                                f"🚨 *INDICATOR ALERT: {symbol}*\n"
-                                f"• *Timeframe:* {tf}\n"
-                                f"• *Price:* ${price:,.2f}\n"
-                                f"• *Source:* {used_exchange}\n\n"
-                                f"📈 *RSI (14):* {rsi_val:.2f}\n"
-                                f"🧪 *MFI (14):* {mfi_val:.2f}"
-                            )
-                            await application.bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
-                    except Exception as loop_err:
-                        logging.error(f"Error inside loop instance for {symbol}: {loop_err}")
+                            trigger_alert = True
+                    except Exception as inner_err:
+                        logging.error(f"Error fetching/calculating for {symbol} on {tf}: {inner_err}")
+
+                # Agar alert banna chahiye aur hamare paas data aaya hai, toh single table format banayein
+                if trigger_alert and timeframe_data:
+                    msg = f"🚨 *MARKET METRIC SCAN: {symbol}*\n"
+                    msg += f"• *Price:* ${last_price:,.4f}\n"
+                    msg += f"• *Source:* {detected_source}\n"
+                    msg += "▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n"
+                    msg += "`TF    │ RSI (14) │ MFI (14)`\n"
+                    msg += "────────────────────\n"
+                    
+                    for tf in TIMEFRAMES:
+                        if tf in timeframe_data:
+                            rsi, mfi = timeframe_data[tf]
+                            
+                            # Row indicators setup for quick reading
+                            rsi_alert = "⚠️" if (rsi <= 30 or rsi >= 70) else "  "
+                            mfi_alert = "🚨" if (mfi <= 20 or mfi >= 80) else "  "
+                            
+                            # Layout padding matrix build
+                            msg += f"`{tf:<5}│ {rsi:<8.2f}{rsi_alert}│ {mfi:<8.2f}{mfi_alert}`\n"
+                    
+                    msg += "────────────────────\n"
+                    msg += "*Status: Active threshold cross detected.*"
+                    
+                    try:
+                        await application.bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
+                    except Exception as send_err:
+                        logging.error(f"Failed to send combined matrix alert: {send_err}")
 
 # Web Server for Render Keep-Alive
 app = Flask(__name__)
