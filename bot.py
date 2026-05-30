@@ -17,13 +17,12 @@ logging.basicConfig(
     stream=sys.stdout
 )
 
-# ==================== APNI DETAILS YAHAN DALO ====================
-# 1. 'YOUR_BOT_TOKEN_HERE' ko hatao aur apna BotFather waala Token likho (single quotes ke andar)
-TOKEN = "YOUR_BOT_TOKEN_HERE"
+# Render ke environment variables se values read ho rahi hain
+TOKEN = os.getenv("TELEGRAM_TOKEN")
+raw_chat_id = os.getenv("USER_CHAT_ID")
 
-# 2. YOUR_CHAT_ID_HERE ko hatao aur apna @userinfobot se mila hua 9-10 digits ka number likho (bina quotes ke)
-USER_CHAT_ID = YOUR_CHAT_ID_HERE
-# ===================================================================
+# Chat ID ko safely integer mein convert karne ke liye
+USER_CHAT_ID = int(raw_chat_id) if (raw_chat_id and raw_chat_id.strip().isdigit()) else None
 
 # Initialize exchanges safely
 EXCHANGES = []
@@ -61,20 +60,19 @@ def calculate_indicators(ohlcv_data):
 
 # Startup Signal Function
 async def send_startup_message(application: Application):
-    """Bot start hote hi aapko personal message bhejega"""
     if USER_CHAT_ID:
         try:
-            await asyncio.sleep(2) # Thoda wait taaki connection stable ho jaye
+            await asyncio.sleep(3) # Stable connection ke liye thoda pause
             await application.bot.send_message(
                 chat_id=USER_CHAT_ID,
                 text="🚀 *Bot started successfully!* Ready to track RSI and MFI.\nUse `/track COIN/USDT` to start.",
                 parse_mode="Markdown"
             )
-            logging.info(f"Startup message sent successfully to chat ID: {USER_CHAT_ID}")
+            logging.info(f"Startup message sent to chat ID: {USER_CHAT_ID}")
         except Exception as e:
-            logging.error(f"Could not send startup message: {e}. Make sure you have started the bot in Telegram.")
+            logging.error(f"Could not send startup message: {e}")
     else:
-        logging.warning("USER_CHAT_ID missing in code. Skipping startup message.")
+        logging.warning("USER_CHAT_ID missing or invalid in Render dashboard.")
 
 # Telegram Command Handlers
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -167,9 +165,8 @@ def run_web_server():
     app.run(host='0.0.0.0', port=port)
 
 def main():
-    # Token validate check
-    if not TOKEN or TOKEN == "YOUR_BOT_TOKEN_HERE":
-        logging.error("CRITICAL: Please hardcode your real Telegram Token inside the script.")
+    if not TOKEN:
+        logging.error("CRITICAL: TELEGRAM_TOKEN variable is missing in Render Environment.")
         sys.exit(1)
         
     logging.info("Initializing Telegram bot framework...")
@@ -180,13 +177,13 @@ def main():
     # Build Telegram App
     application = Application.builder().token(TOKEN).build()
     
-    # Command Handlers registration
+    # Handlers registration
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("track", track_coin))
     application.add_handler(CommandHandler("stop", stop_coin))
     application.add_handler(CommandHandler("status", status))
     
-    # Start startup message task & background checker loop inside asyncio
+    # Tasks integration
     loop = asyncio.get_event_loop()
     loop.create_task(send_startup_message(application))
     loop.create_task(monitoring_job(application))
