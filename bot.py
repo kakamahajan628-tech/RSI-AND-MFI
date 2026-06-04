@@ -24,14 +24,13 @@ raw_chat_id = os.getenv("USER_CHAT_ID")
 # Chat ID ko safely integer mein convert karne ke liye
 USER_CHAT_ID = int(raw_chat_id) if (raw_chat_id and raw_chat_id.strip().isdigit()) else None
 
-# Initialize exchanges safely
+# Initialize only Gate.io safely (Binance/Bybit removed due to geoblocking)
 EXCHANGES = []
 try:
-    EXCHANGES.append(ccxt.binance({'enableRateLimit': True, 'options': {'defaultType': 'future'}}))
-    EXCHANGES.append(ccxt.bybit({'enableRateLimit': True}))
     EXCHANGES.append(ccxt.gateio({'enableRateLimit': True}))
+    logging.info("Gate.io exchange initialized successfully.")
 except Exception as e:
-    logging.error(f"Error initializing exchanges: {e}")
+    logging.error(f"Error initializing Gate.io: {e}")
 
 TRACKED_PAIRS = {}
 TIMEFRAMES = ['5m', '15m', '1h', '4h']
@@ -65,7 +64,7 @@ async def send_startup_message(application: Application):
             await asyncio.sleep(3) # Stable connection ke liye thoda pause
             await application.bot.send_message(
                 chat_id=USER_CHAT_ID,
-                text="🚀 *Bot started successfully!* Ready to track RSI and MFI matrix.\nUse `/track COIN/USDT` to start.",
+                text="🚀 *Bot started successfully with Gate.io!* Ready to track RSI and MFI matrix.\nUse `/track COIN/USDT` to start.",
                 parse_mode="Markdown"
             )
             logging.info(f"Startup message sent to chat ID: {USER_CHAT_ID}")
@@ -77,7 +76,7 @@ async def send_startup_message(application: Application):
 # Telegram Command Handlers
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "⚡ *RSI/MFI Matrix Tracker Active*\n\n"
+        "⚡ *RSI/MFI Matrix Tracker Active (Gate.io)*\n\n"
         "Commands:\n"
         "`/track BTC/USDT` - Start tracking a pair\n"
         "`/stop BTC/USDT` - Stop tracking a pair\n"
@@ -95,7 +94,7 @@ async def track_coin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         TRACKED_PAIRS[chat_id] = set()
     TRACKED_PAIRS[chat_id].add(symbol)
     logging.info(f"Started tracking {symbol} for chat {chat_id}")
-    await update.message.reply_text(f"✅ Now tracking *{symbol}* across 5m, 15m, 1h, and 4h combined matrix.", parse_mode="Markdown")
+    await update.message.reply_text(f"✅ Now tracking *{symbol}* on Gate.io across 5m, 15m, 1h, and 4h combined matrix.", parse_mode="Markdown")
 
 async def stop_coin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -115,9 +114,9 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not pairs: 
         await update.message.reply_text("You are currently tracking 0 assets.")
     else: 
-        await update.message.reply_text(f"📋 *Currently Tracking:*\n" + "\n".join([f"• {p}" for p in pairs]), parse_mode="Markdown")
+        await update.message.reply_text(f"📋 *Currently Tracking (Gate.io):*\n" + "\n".join([f"• {p}" for p in pairs]), parse_mode="Markdown")
 
-# Background Monitoring Loop (MODIFIED: Grabs all timeframes into 1 message)
+# Background Monitoring Loop
 async def monitoring_job(application: Application):
     logging.info("Background tracking core loop running every 60s...")
     while True:
@@ -129,7 +128,6 @@ async def monitoring_job(application: Application):
                 last_price = 0.0
                 detected_source = "Unknown"
 
-                # 4 alag messages bhejne ke bajay pehle saara data ek sath layenge
                 for tf in TIMEFRAMES:
                     try:
                         ohlcv, used_exchange = fetch_ohlcv_with_fallback(symbol, tf)
@@ -150,13 +148,13 @@ async def monitoring_job(application: Application):
                         detected_source = used_exchange
                         timeframe_data[tf] = (rsi_val, mfi_val)
 
-                        # Agar kisi BHI ek timeframe par condition hit hui, toh poora table bhejenge
+                        # Trigger condition check
                         if rsi_val <= 30 or rsi_val >= 70 or mfi_val <= 20 or mfi_val >= 80:
                             trigger_alert = True
                     except Exception as inner_err:
                         logging.error(f"Error fetching/calculating for {symbol} on {tf}: {inner_err}")
 
-                # Agar alert banna chahiye aur hamare paas data aaya hai, toh single table format banayein
+                # Alert send logic
                 if trigger_alert and timeframe_data:
                     msg = f"🚨 *MARKET METRIC SCAN: {symbol}*\n"
                     msg += f"• *Price:* ${last_price:,.4f}\n"
@@ -169,11 +167,9 @@ async def monitoring_job(application: Application):
                         if tf in timeframe_data:
                             rsi, mfi = timeframe_data[tf]
                             
-                            # Row indicators setup for quick reading
                             rsi_alert = "⚠️" if (rsi <= 30 or rsi >= 70) else "  "
                             mfi_alert = "🚨" if (mfi <= 20 or mfi >= 80) else "  "
                             
-                            # Layout padding matrix build
                             msg += f"`{tf:<5}│ {rsi:<8.2f}{rsi_alert}│ {mfi:<8.2f}{mfi_alert}`\n"
                     
                     msg += "────────────────────\n"
