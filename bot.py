@@ -10,7 +10,7 @@ import pandas as pd
 from threading import Thread
 from flask import Flask
 
-# Logging Setup
+# Detailed Logging
 logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s',
     level=logging.INFO,
@@ -18,143 +18,154 @@ logging.basicConfig(
 )
 
 TOKEN = os.getenv("TELEGRAM_TOKEN")
-USER_CHAT_ID = int(os.getenv("USER_CHAT_ID")) if os.getenv("USER_CHAT_ID") else None
 
-# --- Smart Exchange Initialization ---
+# --- Exchange Setup ---
 EXCHANGES = []
 try:
-    # Gate.io instance (Bina defaultType ke, taaki dono markets access ho sakein)
-    gate = ccxt.gateio({
-        'apiKey': os.getenv("GATE_API_KEY"),
-        'secret': os.getenv("GATE_API_SECRET"),
-        'enableRateLimit': True,
-    })
-    # OKX instance
+    gate = ccxt.gateio({'enableRateLimit': True})
     okx = ccxt.okx({
-        'apiKey': os.getenv("OKX_API_KEY"),
-        'secret': os.getenv("OKX_API_SECRET"),
-        'password': os.getenv("OKX_API_PASSWORD"),
         'enableRateLimit': True,
+        'password': os.getenv("OKX_API_PASSWORD")
     })
     EXCHANGES = [gate, okx]
-    logging.info("Exchanges initialized in Multi-Market mode (Futures/Spot).")
+    logging.info("Exchanges initialized for Raw RSI tracking.")
 except Exception as e:
     logging.error(f"Exchange Init Error: {e}")
 
 TRACKED_PAIRS = {}
 TIMEFRAMES = ['5m', '15m', '1h', '4h']
 
-# --- Smart Market Fetcher (Futures with Spot Fallback) ---
-async def fetch_market_data_smart(exchange, symbol, timeframe):
-    """
-    Pehle Futures dhoondega, agar wahan coin nahi mila ya list nahi hai, 
-    toh automatic Spot market se data nikalega.
-    """
+# --- Dedicated RSI Fetcher (Futures with Spot Fallback) ---
+def fetch_rsi_smart(exchange, symbol, timeframe):
     market_types = ['future', 'spot']
     
     for m_type in market_types:
         try:
-            # Exchange ko temporary us market type par switch karo
             exchange.options['defaultType'] = m_type
             
-            # Agar future hai toh market symbol ccxt standard ke mutabiq convert ho sakta hai (e.g., BTC/USDT:USDT)
-            # ccxt load_markets() internally handles matching, but safe side directly fetch karte hain
+            # Fetch Candles & Live Price
             ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=50)
             ticker = exchange.fetch_ticker(symbol)
             
             if ohlcv and len(ohlcv) >= 14:
                 df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-                rsi = ta.momentum.rsi(close=df['close'], window=14).iloc[-1]
-                mfi = ta.volume.money_flow_index(high=df['high'], low=df['low'], close=df['close'], volume=df['volume'], window=14).iloc[-1]
+                rsi_series = ta.momentum.rsi(close=df['close'], window=14)
+                rsi_val = rsi_series.iloc[-1]
                 
+                if pd.isna(rsi_val):
+                    continue
+                    
                 return {
                     "price": ticker['last'],
-                    "rsi": rsi,
-                    "mfi": mfi,
+                    "rsi": rsi_val,
                     "market_type": m_type.upper(),
                     "exchange_name": exchange.name
                 }
         except Exception:
-            # Agar Futures mein error aaya (jaise 'Bad Symbol' ya 'Not Found'), 
-            # toh loop agle step par chalega aur Spot try karega.
-            continue
+            continue  # Fallback to Spot if Future fails
             
     return None
 
 # --- Telegram Handlers ---
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "📈 *Pure RSI Matrix Bot Active*\n\n"
+        "Commands:\n"
+        "`/track COIN/USDT` - Track RSI (Updates every 30s)\n"
+        "`/status` - View active watchlist",
+        parse_mode="Markdown"
+    )
+
 async def track_coin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await update.message.reply_text("❌ Use: `/track COIN/USDT`")
+        await update.message.reply_text("❌ Example: `/track ETH/USDT`")
         return
+    
     symbol = context.args[0].upper()
     chat_id = update.effective_chat.id
-    if chat_id not in TRACKED_PAIRS: TRACKED_PAIRS[chat_id] = set()
+    
+    if chat_id not in TRACKED_PAIRS:
+        TRACKED_PAIRS[chat_id] = set()
+        
     TRACKED_PAIRS[chat_id].add(symbol)
-    await update.message.reply_text(f"✅ Tracking **{symbol}**\n(Pehle Futures check hoga, fallback to Spot).")
+    logging.info(f"Tracking RSI for {symbol}")
+    await update.message.reply_text(f"✅ Now broadcasting *{symbol}* RSI matrix updates every 30 seconds.", parse_mode="Markdown")
 
-async def get_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = "💰 *Spot Wallet Balances:*\n\n"
-    for ex in EXCHANGES:
-        if not ex.apiKey: continue
-        try:
-            ex.options['defaultType'] = 'spot' # Force spot for balance command
-            bal = ex.fetch_balance()
-            total = {k: v for k, v in bal['total'].items() if v > 0}
-            if total:
-                msg += f"🏦 *{ex.name}:*\n" + "\n".join([f"• {c}: `{a:.4f}`" for c, a in total.items()]) + "\n\n"
-        except: msg += f"❌ {ex.name}: API Error\n"
-    await update.message.reply_text(msg if "🏦" in msg else "No Spot balance found.", parse_mode="Markdown")
+async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    pairs = TRACKED_PAIRS.get(chat_id, set())
+    if not pairs:
+        await update.message.reply_text("Watchlist is empty.")
+    else:
+        await update.message.reply_text("📋 *RSI Watchlist:*\n" + "\n".join([f"• {p}" for p in pairs]), parse_mode="Markdown")
 
-# --- Monitoring Loop ---
+# --- Core Loop ---
 async def monitoring_job(application: Application):
     while True:
-        await asyncio.sleep(60)
+        await asyncio.sleep(30)  # Scan every 30 seconds
+        
+        if not TRACKED_PAIRS:
+            continue
+            
         for chat_id, pairs in list(TRACKED_PAIRS.items()):
             for symbol in list(pairs):
                 data_matrix = {}
-                alert_triggered = False
                 current_price = 0.0
                 detected_market = ""
                 detected_source = ""
 
                 for tf in TIMEFRAMES:
                     for ex in EXCHANGES:
-                        data = await fetch_market_data_smart(ex, symbol, tf)
+                        loop = asyncio.get_running_loop()
+                        data = await loop.run_in_executor(None, fetch_rsi_smart, ex, symbol, tf)
+                        
                         if data:
                             current_price = data['price']
                             detected_market = data['market_type']
                             detected_source = data['exchange_name']
-                            data_matrix[tf] = (data['rsi'], data['mfi'])
+                            data_matrix[tf] = data['rsi']
                             
-                            if data['rsi'] <= 30 or data['rsi'] >= 70 or data['mfi'] <= 20 or data['mfi'] >= 80:
-                                alert_triggered = True
-                            break # Timeframe mil gaya toh exchange loop se bahar niklo
+                            # Log to Render Console
+                            logging.info(f"[{symbol} - {tf}] Price: {current_price} | RSI: {data['rsi']:.2f}")
+                            break  # Move to next timeframe
 
-                if alert_triggered and data_matrix:
-                    msg = f"🚨 *METRIC ALERT: {symbol}*\n"
+                # Condition 2 Removed: Agar data aaya hai, toh seedha chat par report bhej do
+                if data_matrix:
+                    msg = f"📊 *RSI UPDATE: {symbol}*\n"
                     msg += f"💵 *Price:* `${current_price:,.4f}`\n"
                     msg += f"🏛 *Source:* {detected_source} ({detected_market})\n"
                     msg += "───────────────────\n"
-                    msg += "`TF    │ RSI    │ MFI`\n"
+                    msg += "`TF    │ RSI (14)`\n"
+                    msg += "───────────────────\n"
+                    
                     for tf in TIMEFRAMES:
                         if tf in data_matrix:
-                            r, m = data_matrix[tf]
-                            msg += f"`{tf:<5}│ {r:<6.1f} │ {m:<6.1f}`\n"
+                            r = data_matrix[tf]
+                            # Visual tags for quick scanning
+                            tag = "🔴 [OB]" if r >= 70 else ("🟢 [OS]" if r <= 30 else "⚪ [MID]")
+                            msg += f"`{tf:<5}│ {r:<6.1f}` {tag}\n"
+                            
                     msg += "───────────────────\n"
                     try:
                         await application.bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
-                    except: pass
+                    except Exception as e:
+                        logging.error(f"Telegram send error: {e}")
 
-# --- Web Server ---
+# --- Web Keep-Alive ---
 app = Flask(__name__)
 @app.route('/')
-def health(): return "Smart Bot Alive", 200
+def health(): return "RSI Bot Running", 200
 
 def main():
     Thread(target=lambda: app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 5000))), daemon=True).start()
+    
+    if not TOKEN:
+        sys.exit(1)
+        
     app_bot = Application.builder().token(TOKEN).build()
+    app_bot.add_handler(CommandHandler("start", start))
     app_bot.add_handler(CommandHandler("track", track_coin))
-    app_bot.add_handler(CommandHandler("balance", get_balance))
+    app_bot.add_handler(CommandHandler("status", status))
     
     loop = asyncio.get_event_loop()
     loop.create_task(monitoring_job(app_bot))
