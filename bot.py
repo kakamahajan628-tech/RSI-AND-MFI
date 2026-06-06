@@ -24,13 +24,17 @@ def health_check():
     """Keeps the Render web service container alive."""
     return {
         "status": "ONLINE",
-        "engine": "RSI Debug Matrix Scanner V11",
+        "engine": "RSI Auto-Loop Restored V14",
         "timestamp": datetime.now(timezone.utc).isoformat()
     }
 
 # ---- RENDER ENVIRONMENT VARIABLES FETCH ----
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN") or os.environ.get("API_KEY") 
-ALLOWED_CHAT_ID = os.environ.get("CHAT_ID")
+
+# RAW String fetch karke clean kar rahe hain extra spaces hatane ke liye
+RAW_CHAT_ID = os.environ.get("CHAT_ID")
+ALLOWED_CHAT_ID = str(RAW_CHAT_ID).strip() if RAW_CHAT_ID else None
+
 RENDER_URL = "https://rsi-and-mfi.onrender.com"  
 
 def setup_telegram_webhook():
@@ -46,13 +50,14 @@ def setup_telegram_webhook():
         print(f"❌ Webhook setups failed: {e}")
 
 def send_telegram_msg(chat_id: int, text: str):
-    """Sends responses back to Telegram User Node"""
-    if not TELEGRAM_TOKEN:
+    """Sends responses back to Telegram safely with safe clean ID casting"""
+    if not TELEGRAM_TOKEN or not chat_id:
         return
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {"chat_id": chat_id, "text": text}
+    payload = {"chat_id": int(chat_id), "text": text}
     try:
-        requests.post(url, json=payload)
+        r = requests.post(url, json=payload)
+        print(f"📡 [LOOP Broadcaster] Target: {chat_id} | Status: {r.status_code}")
     except Exception as e:
         print(f"❌ Failed to send telegram message: {e}")
 
@@ -69,7 +74,8 @@ async def telegram_webhook_handler(request: Request):
         chat_id = message["chat"]["id"]
         text = message.get("text", "").strip()
 
-        if ALLOWED_CHAT_ID and str(chat_id) != str(ALLOWED_CHAT_ID):
+        # Webhook Guard Configuration
+        if ALLOWED_CHAT_ID and str(chat_id) != ALLOWED_CHAT_ID:
             print(f"🔒 [SECURITY] Unauthorized chat blocked: {chat_id}")
             return {"status": "unauthorized"}
 
@@ -81,7 +87,7 @@ async def telegram_webhook_handler(request: Request):
 
         if command == "/start":
             welcome_msg = (
-                "📊 RSI MATRIX SCANNER V11 BOOTED 📊\n\n"
+                "📊 RSI MATRIX SCANNER V14 BOOTED 📊\n\n"
                 "Available Commands:\n"
                 "🔹 /add COIN/USDT — Matrix me coin add karein\n"
                 "🔹 /remove COIN/USDT — Matrix se coin hatayein\n"
@@ -151,11 +157,9 @@ class CompleteSentinelEngine:
                 self.tracked_symbols.remove(symbol)
 
     def calculate_rsi(self, closes: np.ndarray, symbol: str, tf: str) -> float:
-        """Bhai Ka Precise Fixed Pure Float RSI Calculation Logic with Wilder's Smoothing"""
-        # Array explicit conversion with float forced type casting
+        """Pure Wilder's RSI Array Core Calculation"""
         closes = np.asarray(closes, dtype=float)
-
-        if len(closes) < 15: # Safety constraint check
+        if len(closes) < 15:
             return 50.0
 
         delta = np.diff(closes)
@@ -174,11 +178,6 @@ class CompleteSentinelEngine:
 
         rs = avg_gain / avg_loss
         rsi = 100 - (100 / (1 + rs))
-
-        # Core Engine Math Console Tracking Debuggers
-        print(f"📊 [MATH DEBUG] {symbol} | {tf} | Candles Array Input Count: {len(closes)} | Last Close Price: {closes[-1]}")
-        print(f"📈 [MATH DEBUG] {symbol} | {tf} | Calculated Smooth RSI Value -> {round(float(rsi), 2)}")
-        
         return round(float(rsi), 2)
 
     def get_rsi_status(self, rsi_val: float) -> str:
@@ -191,8 +190,8 @@ class CompleteSentinelEngine:
             return f"{rsi_val:.1f}  ⚪ MID"
 
     async def fetch_exchange_data(self, symbol: str, gate_client, okx_client) -> Tuple[Optional[float], Optional[str], Optional[object], str]:
-        """Prioritizes Core CCXT Standards: Gate Future -> OKX Future -> Gate Spot -> OKX Spot"""
-        # 1. GATE FUTURE (FIXED FORMAT: CCXT standard for gate futures is 'BTC/USDT:USDT')
+        """CCXT Router: Gate Future (:USDT) -> OKX Future (:USDT) -> Gate Spot -> OKX Spot"""
+        # 1. GATE FUTURE
         try:
             gate_future_symbol = f"{symbol}:USDT" if not symbol.endswith(":USDT") else symbol
             ticker = await gate_client['future'].fetch_ticker(gate_future_symbol)
@@ -201,7 +200,7 @@ class CompleteSentinelEngine:
         except Exception:
             pass
 
-        # 2. OKX FUTURE (Standard format: 'BTC/USDT:USDT')
+        # 2. OKX FUTURE
         try:
             okx_future_symbol = f"{symbol}:USDT" if not symbol.endswith(":USDT") else symbol
             ticker = await okx_client['future'].fetch_ticker(okx_future_symbol)
@@ -246,18 +245,7 @@ class CompleteSentinelEngine:
         
         for tf in self.timeframes:
             try:
-                # Core Engine Routing Console Logs Debugger
-                print(f"🔍 [ROUTING DEBUG] {symbol} | {tf} | Resolved Active Target Market String = {market_symbol}")
-                
                 ohlcv = await resolved_client.fetch_ohlcv(market_symbol, tf, limit=100)
-                
-                # Dynamic Candle Matrix Tail End Data Print
-                if ohlcv and len(ohlcv) >= 5:
-                    print(f"📦 [RAW OHLCV DEBUG - LAST 5 TAIL CANDLES] For Market node {market_symbol} ({tf}):")
-                    print(ohlcv[-5:])
-                else:
-                    print(f"⚠️ [RAW OHLCV DEBUG] Market node {market_symbol} ({tf}) returned insufficient/empty candles array.")
-
                 if not ohlcv or len(ohlcv) < 15:
                     report += f"{tf:<5} │ --.-  ⚪ MID\n"
                     continue
@@ -266,18 +254,17 @@ class CompleteSentinelEngine:
                 rsi_value = self.calculate_rsi(closes, symbol, tf)
                 status_str = self.get_rsi_status(rsi_value)
                 report += f"{tf:<5} │ {status_str}\n"
-            except Exception as ex:
-                print(f"❌ Error compiling candle metrics inside timeframe track {tf} for {symbol}: {ex}")
+            except Exception:
                 report += f"{tf:<5} │ --.-  ⚪ MID\n"
                 
         report += f"───────────────────\n"
         return report
 
     async def trigger_instant_scan(self, chat_id: int):
-        """On-Demand trigger for processing pipeline data via Telegram commands"""
+        """On-Demand processing via Telegram commands"""
         gate_client = {
-            'future': ccxt.gate({"options": {"defaultType": "swap"}, "enableRateLimit": True}),
-            'spot': ccxt.gate({"options": {"defaultType": "spot"}, "enableRateLimit": True})
+            'future': ccxt.gateio({"options": {"defaultType": "swap"}, "enableRateLimit": True}),
+            'spot': ccxt.gateio({"options": {"defaultType": "spot"}, "enableRateLimit": True})
         }
         okx_client = {
             'future': ccxt.okx({"options": {"defaultType": "swap"}, "enableRateLimit": True}),
@@ -288,16 +275,10 @@ class CompleteSentinelEngine:
             with self.symbol_lock:
                 symbols = self.tracked_symbols.copy()
             
-            final_report = ""
             for symbol in symbols:
                 report = await self.process_single_symbol_report(symbol, gate_client, okx_client)
                 if report:
-                    final_report += report + "\n"
-            
-            if final_report:
-                send_telegram_msg(chat_id, final_report.strip())
-            else:
-                send_telegram_msg(chat_id, "❌ Verification across both exchanges failed. Validate matrix asset tickers.")
+                    send_telegram_msg(chat_id, report.strip())
         finally:
             await gate_client['future'].close()
             await gate_client['spot'].close()
@@ -305,15 +286,18 @@ class CompleteSentinelEngine:
             await okx_client['spot'].close()
 
     async def engine_core_loop(self):
-        """Continuous Automated 2-Minute Dynamic Matrix System Broadcaster"""
-        print("\n🔥 SYSTEM ACTIVE: FALLBACK STRUCTURE LIVE WITH DUAL EXCH FIXED STRINGS 🔥\n")
+        """Continuous Automated 2-Minute Engine Core Loop"""
+        print("\n🔥 SYSTEM ACTIVE: CONTINUOUS 2-MINUTE TRACKING LOOP STARTING 🔥\n")
         
         while True:
             try:
-                if ALLOWED_CHAT_ID:
+                # Strong Validation: Check if clean string version exists
+                if ALLOWED_CHAT_ID and ALLOWED_CHAT_ID != "None" and ALLOWED_CHAT_ID != "":
+                    target_int_id = int(ALLOWED_CHAT_ID)
+                    
                     gate_client = {
-                        'future': ccxt.gate({"options": {"defaultType": "swap"}, "enableRateLimit": True}),
-                        'spot': ccxt.gate({"options": {"defaultType": "spot"}, "enableRateLimit": True})
+                        'future': ccxt.gateio({"options": {"defaultType": "swap"}, "enableRateLimit": True}),
+                        'spot': ccxt.gateio({"options": {"defaultType": "spot"}, "enableRateLimit": True})
                     }
                     okx_client = {
                         'future': ccxt.okx({"options": {"defaultType": "swap"}, "enableRateLimit": True}),
@@ -324,24 +308,22 @@ class CompleteSentinelEngine:
                         with self.symbol_lock:
                             symbols = self.tracked_symbols.copy()
                         
-                        final_report = ""
                         for symbol in symbols:
                             report = await self.process_single_symbol_report(symbol, gate_client, okx_client)
                             if report:
-                                final_report += report + "\n"
-                        
-                        if final_report:
-                            send_telegram_msg(int(ALLOWED_CHAT_ID), final_report.strip())
+                                send_telegram_msg(target_int_id, report.strip())
                     finally:
                         await gate_client['future'].close()
                         await gate_client['spot'].close()
                         await okx_client['future'].close()
                         await okx_client['spot'].close()
+                else:
+                    print("⚠️ [LOOP SKIP] CHAT_ID env variable is not properly synchronized or missing.")
                         
             except Exception as loop_err:
                 print(f"💥 Internal loop execution fault: {str(loop_err)}")
                 
-            await asyncio.sleep(120) # Pure 2 Minutes Auto-Update sequence
+            await asyncio.sleep(120) # 2-Minute precise auto sync interval
 
 # ========================================================
 # 5. ENTRY POINT PROCESS ROUTER
