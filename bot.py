@@ -252,9 +252,13 @@ class CompleteSentinelEngine:
                 print(f"❌ Coin not found in active matrix: {symbol}")
 
     def command_listener(self):
+        print("⌨️ Terminal command listener started (Waiting for input if available)...")
         while True:
             try:
                 cmd = input().strip()
+                if not cmd:
+                    continue
+
                 if cmd.startswith("add "):
                     coin = cmd.split(" ", 1)[1]
                     self.add_coin(coin)
@@ -267,6 +271,10 @@ class CompleteSentinelEngine:
                         for coin in self.tracked_symbols:
                             print(f" - {coin}")
                         print("")
+            except EOFError:
+                # Safe break for Render cloud deployment
+                print("⚠️ Standard input (stdin) not available. Disabling terminal command listener.")
+                break
             except Exception as e:
                 print(f"Command Execution Error: {e}")
 
@@ -350,7 +358,6 @@ class CompleteSentinelEngine:
         exchange_client = ccxt.okx({"enableRateLimit": True})
         try:
             while True:
-                # Local copy banate hain dynamic change handle karne ke liye loop ke dauran
                 with self.symbol_lock:
                     symbols = self.tracked_symbols.copy()
 
