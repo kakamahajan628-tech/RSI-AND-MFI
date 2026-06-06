@@ -6,69 +6,78 @@ import sqlite3
 import uvicorn
 import threading
 from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
 from datetime import datetime, timezone
 from typing import List, Dict, Optional, Tuple
 
 # ==========================================
-# 0. RENDER HEALTH CHECK & CONTROL SERVER (FASTAPI)
+# 0. API DATA MODELS (PYDANTIC JSON BODY)
+# ==========================================
+class CoinRequest(BaseModel):
+    symbol: str
+
+# ==========================================
+# 1. RENDER HEALTH CHECK & CONTROL SERVER (FASTAPI)
 # ==========================================
 app = FastAPI()
-
-# Global engine reference taaki endpoints isse access kar sakein
-sentinel_engine = None
+sentinel_engine = None  # Global instance bridge
 
 @app.get("/")
 def health_check():
     """Keeps the Render web service container alive."""
     global sentinel_engine
-    tracked = sentinel_engine.tracked_symbols if sentinel_engine else []
+    tracked = list(sentinel_engine.tracked_symbols) if sentinel_engine else []
     return {
         "status": "ONLINE",
-        "engine": "The Quantum-Sentinel V8",
+        "engine": "The Quantum-Sentinel V8 Pro",
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "currently_tracking": tracked
     }
 
 @app.get("/tracked")
 def get_tracked_coins():
-    """Returns the list of currently tracked symbols."""
+    """Returns the list of currently tracked symbols from memory."""
     if not sentinel_engine:
         raise HTTPException(status_code=503, detail="Engine not initialized yet")
-    return {"tracked_symbols": sentinel_engine.tracked_symbols}
+    return {"tracked_symbols": list(sentinel_engine.tracked_symbols)}
 
 @app.post("/add_coin")
-def add_coin(symbol: str):
-    """Adds a coin to the dynamic tracking list (Format: BTC/USDT)."""
+def add_coin(req: CoinRequest):
+    """Adds a coin via JSON Body and persists it in SQLite."""
     if not sentinel_engine:
         raise HTTPException(status_code=503, detail="Engine not initialized yet")
     
-    symbol_upper = symbol.upper().strip()
-    if symbol_upper in sentinel_engine.tracked_symbols:
-        return {"message": f"⚠️ {symbol_upper} is already being tracked.", "tracked_symbols": sentinel_engine.tracked_symbols}
-    
-    sentinel_engine.tracked_symbols.append(symbol_upper)
-    return {"message": f"✅ Successfully added {symbol_upper} to tracking list.", "tracked_symbols": sentinel_engine.tracked_symbols}
+    symbol_upper = req.symbol.upper().strip()
+    sentinel_engine.add_symbol(symbol_upper)
+    return {
+        "status": "SUCCESS",
+        "message": f"✅ {symbol_upper} added permanently to watchlist.",
+        "tracked_symbols": list(sentinel_engine.tracked_symbols)
+    }
 
 @app.post("/remove_coin")
-def remove_coin(symbol: str):
-    """Removes/Stops tracking a coin (Format: BTC/USDT)."""
+def remove_coin(req: CoinRequest):
+    """Removes a coin via JSON Body and deletes it from SQLite."""
     if not sentinel_engine:
         raise HTTPException(status_code=503, detail="Engine not initialized yet")
     
-    symbol_upper = symbol.upper().strip()
+    symbol_upper = req.symbol.upper().strip()
     if symbol_upper not in sentinel_engine.tracked_symbols:
-        raise HTTPException(status_code=404, detail=f"{symbol_upper} is not in the tracking list.")
+        raise HTTPException(status_code=404, detail=f"❌ {symbol_upper} not found in active watchlist.")
     
-    sentinel_engine.tracked_symbols.remove(symbol_upper)
-    return {"message": f"🛑 Successfully removed/stopped tracking {symbol_upper}.", "tracked_symbols": sentinel_engine.tracked_symbols}
-
+    sentinel_engine.remove_symbol(symbol_upper)
+    return {
+        "status": "SUCCESS",
+        "message": f"🛑 {symbol_upper} removed permanently from watchlist.",
+        "tracked_symbols": list(sentinel_engine.tracked_symbols)
+    }
 
 def start_render_health_gateway():
-    """Runs Uvicorn server on a background thread to satisfy Render's port binding."""
+    """Runs Uvicorn server on a background thread."""
     uvicorn.run(app, host="0.0.0.0", port=10000, log_level="warning")
 
 # ==========================================
-# 1. DATABASE PERSISTENCE LAYER
+# 2. DATABASE PERSISTENCE LAYER (PERSISTENT TRACKING)
 # ==========================================
 class AdvancedSignalDatabase:
     def __init__(self, db_name="sentinel_quantum_v8.db"):
@@ -78,6 +87,7 @@ class AdvancedSignalDatabase:
     def _init_db(self):
         with sqlite3.connect(self.db_name) as conn:
             cursor = conn.cursor()
+            # Core Quantitative Trade Journal
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS quantitative_journal (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -87,6 +97,12 @@ class AdvancedSignalDatabase:
                     feature_choch INTEGER, feature_sweep INTEGER,
                     feature_ob INTEGER, feature_fvg INTEGER, feature_premium INTEGER,
                     calculated_confidence REAL
+                )
+            """)
+            # Persistent watchlist table
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS tracked_coins (
+                    symbol TEXT PRIMARY KEY
                 )
             """)
             conn.commit()
@@ -135,7 +151,7 @@ class AdvancedSignalDatabase:
         return calculated_weights
 
 # ========================================================
-# 2. STRUCTURAL AND INSTITUTIONAL ENGINE
+# 3. STRUCTURAL AND INSTITUTIONAL ENGINE
 # ========================================================
 class StructuralStateEngine:
     def __init__(self, sensitivity: int = 3):
@@ -234,7 +250,7 @@ class TrueLifecycleScanner:
         return ob_profile
 
 # ========================================================
-# 3. VOLATILITY RISK & SESSION LAYERS
+# 4. VOLATILITY RISK & SESSION LAYERS
 # ========================================================
 class ProductionRiskManager:
     @staticmethod
@@ -264,13 +280,48 @@ class SessionKillzoneFilter:
         return False, "OUTSIDE_KILLZONE"
 
 # ========================================================
-# 4. CORE ENGINE CORE ORCHESTRATOR
+# 5. CORE ENGINE SYSTEM ORCHESTRATOR
 # ========================================================
 class CompleteSentinelEngine:
     def __init__(self):
         self.db = AdvancedSignalDatabase()
         self.structure_engine = StructuralStateEngine()
-        self.tracked_symbols = ["BTC/USDT", "ETH/USDT"] # Dynamic Token Tracking list
+        self.tracked_symbols = set()  # Set for O(1) thread-safe adjustments
+        self.load_tracked_symbols()
+
+    def load_tracked_symbols(self):
+        """Loads tracked coins from SQLite on boot. Defaults to BTC & ETH if empty."""
+        with sqlite3.connect(self.db.db_name) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT symbol FROM tracked_coins")
+            rows = cursor.fetchall()
+        
+        self.tracked_symbols = {row[0] for row in rows}
+        if not self.tracked_symbols:
+            # Seed default symbols if table is completely fresh
+            self.tracked_symbols = {"BTC/USDT", "ETH/USDT"}
+            with sqlite3.connect(self.db.db_name) as conn:
+                cursor = conn.cursor()
+                cursor.executemany("INSERT OR IGNORE INTO tracked_coins (symbol) VALUES (?)", [("BTC/USDT",), ("ETH/USDT",)])
+                conn.commit()
+
+    def add_symbol(self, symbol: str):
+        """Thread-safe state addition with database writing."""
+        self.tracked_symbols.add(symbol)
+        with sqlite3.connect(self.db.db_name) as conn:
+            cursor = conn.cursor()
+            cursor.execute("INSERT OR IGNORE INTO tracked_coins (symbol) VALUES (?)", (symbol,))
+            conn.commit()
+        print(f"➕ [WATCHLIST] {symbol} appended to database and memory storage.")
+
+    def remove_symbol(self, symbol: str):
+        """Thread-safe state eviction with database deletion."""
+        self.tracked_symbols.discard(symbol)
+        with sqlite3.connect(self.db.db_name) as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM tracked_coins WHERE symbol = ?", (symbol,))
+            conn.commit()
+        print(f"🛑 [WATCHLIST] {symbol} executed and evicted from engine runtime.")
 
     async def process_market_execution(self, symbol: str, exchange: ccxt.Exchange):
         allowed, session_name = SessionKillzoneFilter.check_killzone()
@@ -339,41 +390,42 @@ class CompleteSentinelEngine:
             print(f"❌ [CRITICAL PIPELINE ERROR] Asset {symbol} context faulted: {str(err)}")
 
     async def engine_core_loop(self):
-        """Infinite tracking execution loop running every 5 minutes."""
+        """Infinite tracking execution loop running every 60 seconds."""
         print("\n" + "="*60)
         print(" 🔥 THE QUANT-SENTINEL V8 ENGINE INITIALIZED SUCCESSFULLY 🔥")
         print("="*60)
-        print(f"➔ Boot Timestamp : {datetime.now(timezone.utc).isoformat()}")
-        print("➔ Network Mode   : CCXT Async Engine Connected")
-        print("➔ Guard Server   : FastAPI Live Gateway Port 10000 Active")
+        print(f"➔ Boot Watchlist : {list(self.tracked_symbols)}")
+        print("➔ Scan Interval  : 1 Minute Loop Active (60s)")
         print("➔ Engine Sandbox : Multi-Timeframe Bayesian Optimization Active")
         print("="*60 + "\n")
 
         exchange_client = ccxt.okx({"enableRateLimit": True})
         try:
             while True:
-                # Runtime par loop ke dauran coin add/remove safely handle karne ke liye list ki copy li hai
-                current_symbols = list(self.tracked_symbols)
-                for symbol in current_symbols:
-                    # Double check agar loop chalne ke dauran hi coin remove ho gaya ho
+                # Snap snapshot allocation safely using casting
+                current_snapshot = list(self.tracked_symbols)
+                for symbol in current_snapshot:
+                    # In-flight runtime execution drop verification 
                     if symbol in self.tracked_symbols:
                         await self.process_market_execution(symbol, exchange_client)
-                await asyncio.sleep(300) # Tick sequence: 5 minutes
+                
+                # CHANGED: Loop interval shifted to 1 minute (60 seconds)
+                await asyncio.sleep(60)
         except Exception as loop_err:
             print(f"💥 Critical Error in main execution engine loop: {str(loop_err)}")
         finally:
             await exchange_client.close()
 
 # ========================================================
-# 5. ENTRY POINT PROCESS ROUTER
+# 6. ENTRY POINT PROCESS ROUTER
 # ========================================================
 if __name__ == "__main__":
-    # Step 1: Initialize global engine object so FastAPI can control it
+    # Initialize Engine instance assigned to global scope object
     sentinel_engine = CompleteSentinelEngine()
 
-    # Step 2: Start Render health validation proxy on background daemon thread
+    # Deploy FastAPI proxy thread gateway
     server_thread = threading.Thread(target=start_render_health_gateway, daemon=True)
     server_thread.start()
     
-    # Step 3: Fire Up Main Async Quant Processing Core Pipeline
+    # Execute Main High-Frequency Engine Processing Loop
     asyncio.run(sentinel_engine.engine_core_loop())
