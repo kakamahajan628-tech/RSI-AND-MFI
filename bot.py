@@ -1,3 +1,4 @@
+import os
 import pandas as pd
 import numpy as np
 import ccxt.async_support as ccxt
@@ -5,14 +6,18 @@ import asyncio
 import sqlite3
 import uvicorn
 import threading
-from fastapi import FastAPI
+import requests
+from fastapi import FastAPI, Request
 from datetime import datetime, timezone
 from typing import List, Dict, Optional, Tuple
 
 # ==========================================
-# 0. RENDER HEALTH CHECK SERVER (FASTAPI)
+# 0. RENDER HEALTH CHECK & TELEGRAM GATEWAY
 # ==========================================
 app = FastAPI()
+
+# Global Engine Reference Webhook Core ke liye
+engine_instance = None
 
 @app.get("/")
 def health_check():
@@ -23,8 +28,101 @@ def health_check():
         "timestamp": datetime.now(timezone.utc).isoformat()
     }
 
+# ---- RENDER ENVIRONMENT VARIABLES FETCH ----
+# Render Dashboard ke Environment Variables se auto-detect karega
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN") or os.environ.get("API_KEY") 
+ALLOWED_CHAT_ID = os.environ.get("CHAT_ID")
+RENDER_URL = "https://rsi-and-mfi.onrender.com"  # Aapka Render URL
+
+def setup_telegram_webhook():
+    """Automated Webhook Registration for Render Architecture"""
+    if not TELEGRAM_TOKEN:
+        print("⚠️ [TELEGRAM ERROR] Bot Token (TELEGRAM_TOKEN / API_KEY) missing in Render Env Variables!")
+        return
+    webhook_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/setWebhook?url={RENDER_URL}/tg-webhook"
+    try:
+        res = requests.get(webhook_url).json()
+        print(f"📡 [TELEGRAM WEBHOOK STATUS] : {res}")
+    except Exception as e:
+        print(f"❌ Webhook setups failed: {e}")
+
+def send_telegram_msg(chat_id: int, text: str):
+    """Sends async responses back to Telegram User Node"""
+    if not TELEGRAM_TOKEN:
+        return
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    payload = {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
+    try:
+        requests.post(url, json=payload)
+    except Exception as e:
+        print(f"❌ Failed to send telegram message: {e}")
+
+@app.post("/tg-webhook")
+async def telegram_webhook_handler(request: Request):
+    """Listens to direct updates from Telegram servers securely"""
+    global engine_instance
+    try:
+        data = await request.json()
+        if "message" not in data:
+            return {"status": "ignored"}
+            
+        message = data["message"]
+        chat_id = message["chat"]["id"]
+        text = message.get("text", "").strip()
+
+        # SECURITY GUARD: Agar Render me CHAT_ID set hai, toh sirf aapke message par reply karega
+        if ALLOWED_CHAT_ID and str(chat_id) != str(ALLOWED_CHAT_ID):
+            print(f"🔒 [SECURITY] Unauthorized chat attempt blocked from Chat ID: {chat_id}")
+            return {"status": "unauthorized"}
+
+        if not text.startswith("/"):
+            return {"status": "not a command"}
+
+        # COMMAND PROCESSING PARSER
+        parts = text.split(" ")
+        command = parts[0].lower()
+
+        if command == "/start":
+            welcome_msg = (
+                "🔥 *The Quant-Sentinel V8 Booted* 🔥\n\n"
+                "Available Commands:\n"
+                "🔹 `/add SOL/USDT` — Add asset to core tracking matrix\n"
+                "🔹 `/remove BTC/USDT` — Stop asset tracking loop\n"
+                "🔹 `/list` — View active scanned assets"
+            )
+            send_telegram_msg(chat_id, welcome_msg)
+
+        elif command == "/add":
+            if len(parts) < 2:
+                send_telegram_msg(chat_id, "⚠️ Usage Example: `/add SOL/USDT`")
+            else:
+                coin = parts[1].upper()
+                if engine_instance:
+                    engine_instance.add_coin(coin)
+                    send_telegram_msg(chat_id, f"✅ *Scalper Activated for:* {coin}")
+
+        elif command == "/remove":
+            if len(parts) < 2:
+                send_telegram_msg(chat_id, "⚠️ Usage Example: `/remove ETH/USDT`")
+            else:
+                coin = parts[1].upper()
+                if engine_instance:
+                    engine_instance.remove_coin(coin)
+                    send_telegram_msg(chat_id, f"🗑️ *Stopped scanning matrix node:* {coin}")
+
+        elif command == "/list":
+            if engine_instance:
+                with engine_instance.symbol_lock:
+                    coins = "\n".join([f"• `{c}`" for c in engine_instance.tracked_symbols])
+                send_telegram_msg(chat_id, f"📋 *Active Dynamic Tracking Matrix:*\n\n{coins if coins else 'Empty matrix'}")
+
+    except Exception as err:
+        print(f"❌ [WEBHOOK CORRUPTION ERROR] : {str(err)}")
+    return {"status": "ok"}
+
 def start_render_health_gateway():
     """Runs Uvicorn server on a background thread to satisfy Render's port binding."""
+    setup_telegram_webhook()
     uvicorn.run(app, host="0.0.0.0", port=10000, log_level="warning")
 
 # ==========================================
@@ -218,170 +316,4 @@ class SessionKillzoneFilter:
     @staticmethod
     def check_killzone() -> Tuple[bool, str]:
         current_hour_utc = datetime.now(timezone.utc).hour
-        if 7 <= current_hour_utc <= 10: return True, "LONDON_OPEN"
-        elif 12 <= current_hour_utc <= 15: return True, "NEW_YORK_OPEN"
-        elif 0 <= current_hour_utc <= 3: return True, "ASIA_ACCUMULATION"
-        return False, "OUTSIDE_KILLZONE"
-
-# ========================================================
-# 4. CORE ENGINE CORE ORCHESTRATOR
-# ========================================================
-class CompleteSentinelEngine:
-    def __init__(self):
-        self.db = AdvancedSignalDatabase()
-        self.structure_engine = StructuralStateEngine()
-        self.tracked_symbols = ["BTC/USDT", "ETH/USDT"] # Dynamic Token Tracking list
-        self.symbol_lock = threading.Lock() # Thread-safe operations control
-
-    def add_coin(self, symbol: str):
-        symbol = symbol.upper().strip()
-        with self.symbol_lock:
-            if symbol not in self.tracked_symbols:
-                self.tracked_symbols.append(symbol)
-                print(f"✅ Coin Added for Scanning: {symbol}")
-            else:
-                print(f"⚠️ {symbol} already exists in tracking matrix.")
-
-    def remove_coin(self, symbol: str):
-        symbol = symbol.upper().strip()
-        with self.symbol_lock:
-            if symbol in self.tracked_symbols:
-                self.tracked_symbols.remove(symbol)
-                print(f"🗑️ Tracking Stopped & Coin Removed: {symbol}")
-            else:
-                print(f"❌ Coin not found in active matrix: {symbol}")
-
-    def command_listener(self):
-        print("⌨️ Terminal command listener started (Waiting for input if available)...")
-        while True:
-            try:
-                cmd = input().strip()
-                if not cmd:
-                    continue
-
-                if cmd.startswith("add "):
-                    coin = cmd.split(" ", 1)[1]
-                    self.add_coin(coin)
-                elif cmd.startswith("remove "):
-                    coin = cmd.split(" ", 1)[1]
-                    self.remove_coin(coin)
-                elif cmd == "list":
-                    with self.symbol_lock:
-                        print("\n📋 Current Active Tracked Coins:")
-                        for coin in self.tracked_symbols:
-                            print(f" - {coin}")
-                        print("")
-            except EOFError:
-                # Safe break for Render cloud deployment
-                print("⚠️ Standard input (stdin) not available. Disabling terminal command listener.")
-                break
-            except Exception as e:
-                print(f"Command Execution Error: {e}")
-
-    async def process_market_execution(self, symbol: str, exchange: ccxt.Exchange):
-        allowed, session_name = SessionKillzoneFilter.check_killzone()
-        if not allowed:
-            print(f"⏳ [SESSION_GUARD] Skipping {symbol} (Hour UTC: {datetime.now(timezone.utc).hour}). Outside Volume Killzone.")
-            return
-
-        try:
-            ltf_ohlcv = await exchange.fetch_ohlcv(symbol, '15m', limit=150)
-            htf_ohlcv = await exchange.fetch_ohlcv(symbol, '4h', limit=50)
-            if len(ltf_ohlcv) < 30 or len(htf_ohlcv) < 20: return
-            
-            df_ltf = pd.DataFrame(ltf_ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-            df_htf = pd.DataFrame(htf_ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-            
-            df_ltf, state_meta = self.structure_engine.map_market_geometry(df_ltf)
-            closes, volumes = df_ltf['close'].values, df_ltf['volume'].values
-            vol_ma = df_ltf['volume'].rolling(20).mean().values
-            vol_valid = volumes[-1] > vol_ma[-1] * 1.5 if not np.isnan(vol_ma[-1]) else False
-            
-            true_bear_choch = False
-            if state_meta["last_hl"] and closes[-1] < state_meta["last_hl"] and vol_valid:
-                true_bear_choch = True
-                
-            liquidity = TrueLifecycleScanner.calculate_clustered_liquidity(df_ltf)
-            true_bear_sweep = False
-            if liquidity["EQH"]:
-                max_eqh_target = max(liquidity["EQH"])
-                if df_ltf['high'].iloc[-1] > max_eqh_target and closes[-1] < max_eqh_target:
-                    true_bear_sweep = True
-                    
-            fvg_profile = TrueLifecycleScanner.scan_fvg_depth_profiles(df_ltf)
-            ob_profile = TrueLifecycleScanner.qualify_institutional_blocks(df_ltf, state_meta)
-            equilibrium = (state_meta["dealing_high"] + state_meta["dealing_low"]) / 2
-            in_premium_pricing = closes[-1] > equilibrium
-            
-            calibrated_weights = self.db.query_bayesian_weights()
-            features_matrix = {
-                "bias": 1 if in_premium_pricing else 0, "sweep": 1 if true_bear_sweep else 0,
-                "choch": 1 if (true_bear_choch or state_meta["bos_confirmed"]) else 0,
-                "ob": 1 if (ob_profile["ob_active"] or ob_profile["breaker_active"]) else 0,
-                "fvg": 1 if (fvg_profile["fvg_valid"] or fvg_profile["ce_rejected"]) else 0
-            }
-            
-            confidence_index = (features_matrix["bias"] * calibrated_weights["BIAS"] +
-                                features_matrix["sweep"] * calibrated_weights["SWEEP"] +
-                                features_matrix["choch"] * calibrated_weights["CHOCH"] +
-                                features_matrix["ob"] * calibrated_weights["OB"] +
-                                features_matrix["fvg"] * calibrated_weights["FVG"])
-
-            if confidence_index >= 65.0:
-                entry = float(closes[-1])
-                sl, tp, atr_val = ProductionRiskManager.generate_protected_boundaries(df_ltf, "SHORT", entry, state_meta)
-                self.db.log_trade_intent(symbol, "SHORT", entry, sl, tp, confidence_index, features_matrix)
-                
-                print(f"\n==========================================================")
-                print(f"🚨 [V8 SIGNAL TRIGGERED] SENTINEL EXECUTION ALIGNED")
-                print(f"==========================================================")
-                print(f"➔ Symbol Node: {symbol} | Active Session Focus: {session_name}")
-                print(f"➔ Execution Matrix -> Entry: {entry} | SL: {sl:.2f} | TP: {tp:.2f}")
-                print(f"📊 BAYESIAN RESOLUTION CONFLUENCE: {confidence_index:.2f}% CONFIDENCE.")
-                print(f"==========================================================\n")
-            else:
-                print(f"⏳ [SCANNER] {symbol} | Matrix Score: {confidence_index:.2f}% | Searching setup...")
-        except Exception as err:
-            print(f"❌ [CRITICAL PIPELINE ERROR] Asset {symbol} context faulted: {str(err)}")
-
-    async def engine_core_loop(self):
-        """Infinite tracking execution loop running every 5 minutes."""
-        print("\n" + "="*60)
-        print(" 🔥 THE QUANT-SENTINEL V8 ENGINE INITIALIZED SUCCESSFULLY 🔥")
-        print("="*60)
-        print(f"➔ Boot Timestamp : {datetime.now(timezone.utc).isoformat()}")
-        print("➔ Network Mode   : CCXT Async Engine Connected")
-        print("➔ Guard Server   : FastAPI Live Gateway Port 10000 Active")
-        print("➔ Engine Sandbox : Multi-Timeframe Bayesian Optimization Active")
-        print("="*60 + "\n")
-
-        exchange_client = ccxt.okx({"enableRateLimit": True})
-        try:
-            while True:
-                with self.symbol_lock:
-                    symbols = self.tracked_symbols.copy()
-
-                for symbol in symbols:
-                    await self.process_market_execution(symbol, exchange_client)
-                await asyncio.sleep(300) # Tick sequence: 5 minutes
-        except Exception as loop_err:
-            print(f"💥 Critical Error in main execution engine loop: {str(loop_err)}")
-        finally:
-            await exchange_client.close()
-
-# ========================================================
-# 5. ENTRY POINT PROCESS ROUTER
-# ========================================================
-if __name__ == "__main__":
-    # Step 1: Start Render health validation proxy on background daemon thread
-    server_thread = threading.Thread(target=start_render_health_gateway, daemon=True)
-    server_thread.start()
-    
-    # Step 2: Initialize engine instance
-    engine = CompleteSentinelEngine()
-
-    # Step 3: Run Command Listener in separate Background Thread
-    threading.Thread(target=engine.command_listener, daemon=True).start()
-    
-    # Step 4: Fire Up Main Async Quant Processing Core Pipeline
-    asyncio.run(engine.engine_core_loop())
+        if 7 <= current_hour_utc <= 10: return True
