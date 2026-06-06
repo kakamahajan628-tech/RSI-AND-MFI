@@ -24,7 +24,7 @@ def health_check():
     """Keeps the Render web service container alive."""
     return {
         "status": "ONLINE",
-        "engine": "RSI Dual-Exchange Matrix Scanner V9",
+        "engine": "RSI Dual-Exchange Matrix Scanner V10",
         "timestamp": datetime.now(timezone.utc).isoformat()
     }
 
@@ -81,7 +81,7 @@ async def telegram_webhook_handler(request: Request):
 
         if command == "/start":
             welcome_msg = (
-                "📊 RSI MATRIX SCANNER V9 BOOTED 📊\n\n"
+                "📊 RSI MATRIX SCANNER V10 BOOTED 📊\n\n"
                 "Available Commands:\n"
                 "🔹 /add COIN/USDT — Matrix me coin add karein\n"
                 "🔹 /remove COIN/USDT — Matrix se coin hatayein\n"
@@ -150,45 +150,53 @@ class CompleteSentinelEngine:
             if symbol in self.tracked_symbols:
                 self.tracked_symbols.remove(symbol)
 
-    def calculate_rsi(self, closes: np.ndarray, period: int = 14) -> float:
-        """Standard Wilder's Moving Average RSI Calculation to prevent 99.0 Skewness"""
-        if len(closes) < period + 1:
-            return 50.0
-        
-        delta = np.diff(closes)
-        seed = delta[:period]
-        up = seed[seed >= 0].sum() / period
-        down = -seed[seed < 0].sum() / period
-        
-        if down == 0:
-            rs = 100.0
-        else:
-            rs = up / down
-        rsi = np.zeros_like(closes)
-        rsi[:period] = 100.0 - (100.0 / (100.0 + rs))
-
-        for i in range(period, len(delta)):
-            diff = delta[i]
-            if diff > 0:
-                upval = diff
-                downval = 0.0
-            else:
-                upval = 0.0
-                downval = -diff
+    def calculate_rsi(self, df_ohlcv: List, period: int = 14) -> Optional[float]:
+        """Robust Market Parsing Architecture supporting structural mutations across CCXT networks"""
+        try:
+            if not df_ohlcv or len(df_ohlcv) < period + 2:
+                return None
                 
-            up = (up * (period - 1) + upval) / period
-            down = (down * (period - 1) + downval) / period
+            # Pandas integration for guaranteed index sequencing alignment
+            df = pd.DataFrame(df_ohlcv, columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
             
-            if down == 0:
-                rs = 100.0
-            else:
-                rs = up / down
-            rsi[i] = 100.0 - (100.0 / (100.0 + rs))
+            # Data cleansing to ensure smooth calculation profiles
+            df['close'] = pd.to_numeric(df['close'], errors='coerce')
+            df = df.dropna(subset=['close'])
             
-        return float(rsi[-1])
+            if len(df) < period + 1:
+                return None
 
-    def get_rsi_status(self, rsi_val: float) -> str:
-        """Standard Boundary Matrix Labels"""
+            closes = df['close'].values
+            delta = np.diff(closes)
+            
+            # Wilder's Smoothing Moving Average Logic Initialization
+            gains = np.where(delta > 0, delta, 0.0)
+            losses = np.where(delta < 0, -delta, 0.0)
+            
+            avg_gain = np.mean(gains[:period])
+            avg_loss = np.mean(losses[:period])
+            
+            for i in range(period, len(delta)):
+                avg_gain = (avg_gain * (period - 1) + gains[i]) / period
+                avg_loss = (avg_loss * (period - 1) + losses[i]) / period
+                
+            if avg_loss == 0:
+                return 100.0 if avg_gain > 0 else 50.0
+                
+            rs = avg_gain / avg_loss
+            rsi_val = 100.0 - (100.0 / (100.0 + rs))
+            
+            if np.isnan(rsi_val) or np.isinf(rsi_val):
+                return None
+                
+            return float(rsi_val)
+        except Exception:
+            return None
+
+    def get_rsi_status(self, rsi_val: Optional[float]) -> str:
+        """Standard Boundary Matrix Labels with explicit failover handling"""
+        if rsi_val is None:
+            return "--.-  ⚪ MID"
         if rsi_val >= 70.0:
             return f"{rsi_val:.1f}  🔴 OB"
         elif rsi_val <= 30.0:
@@ -202,7 +210,8 @@ class CompleteSentinelEngine:
         try:
             gate_future_symbol = symbol.replace("/", "_")
             ticker = await gate_client['future'].fetch_ticker(gate_future_symbol)
-            return ticker.get('last', 0.0), "Gate (FUTURE)", gate_client['future'], gate_future_symbol
+            if ticker and ticker.get('last'):
+                return float(ticker['last']), "Gate (FUTURE)", gate_client['future'], gate_future_symbol
         except Exception:
             pass
 
@@ -210,7 +219,8 @@ class CompleteSentinelEngine:
         try:
             okx_future_symbol = symbol + ":USDT"
             ticker = await okx_client['future'].fetch_ticker(okx_future_symbol)
-            return ticker.get('last', 0.0), "OKX (FUTURE)", okx_client['future'], okx_future_symbol
+            if ticker and ticker.get('last'):
+                return float(ticker['last']), "OKX (FUTURE)", okx_client['future'], okx_future_symbol
         except Exception:
             pass
 
@@ -218,7 +228,8 @@ class CompleteSentinelEngine:
         try:
             gate_spot_symbol = symbol
             ticker = await gate_client['spot'].fetch_ticker(gate_spot_symbol)
-            return ticker.get('last', 0.0), "Gate (SPOT)", gate_client['spot'], gate_spot_symbol
+            if ticker and ticker.get('last'):
+                return float(ticker['last']), "Gate (SPOT)", gate_client['spot'], gate_spot_symbol
         except Exception:
             pass
 
@@ -226,7 +237,8 @@ class CompleteSentinelEngine:
         try:
             okx_spot_symbol = symbol
             ticker = await okx_client['spot'].fetch_ticker(okx_spot_symbol)
-            return ticker.get('last', 0.0), "OKX (SPOT)", okx_client['spot'], okx_spot_symbol
+            if ticker and ticker.get('last'):
+                return float(ticker['last']), "OKX (SPOT)", okx_client['spot'], okx_spot_symbol
         except Exception:
             pass
 
@@ -248,17 +260,13 @@ class CompleteSentinelEngine:
         
         for tf in self.timeframes:
             try:
-                # Historical candle limit badha di taaki RSI zero/99 edge scenarios accurate ho sakein
-                ohlcv = await resolved_client.fetch_ohlcv(market_symbol, tf, limit=100)
-                if len(ohlcv) < 20:
-                    report += f"{tf:<5} │ --.0  ⚪ MID\n"
-                    continue
-                closes = np.array([x[4] for x in ohlcv])
-                rsi_value = self.calculate_rsi(closes)
+                # Limit sets to 150 candles for highly accurate Wilder exponential weight seeds
+                ohlcv = await resolved_client.fetch_ohlcv(market_symbol, tf, limit=150)
+                rsi_value = self.calculate_rsi(ohlcv)
                 status_str = self.get_rsi_status(rsi_value)
                 report += f"{tf:<5} │ {status_str}\n"
             except Exception:
-                report += f"{tf:<5} │ --.0  ⚪ MID\n"
+                report += f"{tf:<5} │ --.-  ⚪ MID\n"
                 
         report += f"───────────────────\n"
         return report
