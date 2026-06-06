@@ -24,42 +24,51 @@ def health_check():
     """Keeps the Render web service container alive."""
     return {
         "status": "ONLINE",
-        "engine": "RSI Auto-Loop Restored V14",
+        "engine": "RSI Audited Auto-Loop V17",
         "timestamp": datetime.now(timezone.utc).isoformat()
     }
 
-# ---- RENDER ENVIRONMENT VARIABLES FETCH ----
+# ---- RENDER ENVIRONMENT VARIABLES FETCH & CLEANING ----
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN") or os.environ.get("API_KEY") 
 
-# RAW String fetch karke clean kar rahe hain extra spaces hatane ke liye
 RAW_CHAT_ID = os.environ.get("CHAT_ID")
-ALLOWED_CHAT_ID = str(RAW_CHAT_ID).strip() if RAW_CHAT_ID else None
+# Strict sanitize filter to destroy trailing strings/spaces/falsy objects
+if RAW_CHAT_ID and str(RAW_CHAT_ID).strip() not in ["None", "none", "", "null", "False"]:
+    ALLOWED_CHAT_ID = str(RAW_CHAT_ID).strip()
+else:
+    ALLOWED_CHAT_ID = None
 
 RENDER_URL = "https://rsi-and-mfi.onrender.com"  
 
-def setup_telegram_webhook():
-    """Automated Webhook Registration for Render Architecture"""
-    if not TELEGRAM_TOKEN:
-        print("⚠️ [TELEGRAM ERROR] Bot Token missing in Render Env Variables!")
-        return
-    webhook_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/setWebhook?url={RENDER_URL}/tg-webhook"
-    try:
-        res = requests.get(webhook_url).json()
-        print(f"📡 [TELEGRAM WEBHOOK STATUS] : {res}")
-    except Exception as e:
-        print(f"❌ Webhook setups failed: {e}")
-
 def send_telegram_msg(chat_id: int, text: str):
-    """Sends responses back to Telegram safely with safe clean ID casting"""
+    """Sends responses back to Telegram safely with strict audit prints"""
     if not TELEGRAM_TOKEN or not chat_id:
+        print(f"⚠️ [TELEGRAM FATAL] Dispatch skipped! Token empty or invalid Chat ID node detected: {chat_id}")
         return
+    
+    print(f"📡 [DISPATCH SYSTEM] Sending Telegram Message To Chat ID: {chat_id}")
+    print(f"📝 [PREVIEW TEXT - FIRST 100 CHARS]:\n{text[:100]}...\n")
+    
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {"chat_id": int(chat_id), "text": text}
     try:
         r = requests.post(url, json=payload)
-        print(f"📡 [LOOP Broadcaster] Target: {chat_id} | Status: {r.status_code}")
+        print(f"📡 [TELEGRAM API OUTBOUND STATUS CODE] : {r.status_code}")
+        print(f"📄 [TELEGRAM API RAW RESPONSE TEXT] : {r.text}")
     except Exception as e:
-        print(f"❌ Failed to send telegram message: {e}")
+        print(f"❌ Critical Exception caught inside Telegram channel broadcaster: {e}")
+
+def setup_telegram_webhook():
+    """Automated Webhook Registration for Render Architecture"""
+    if not TELEGRAM_TOKEN:
+        print("⚠️ [TELEGRAM WEBHOOK ERROR] Bot Token missing in Render Configuration Variables!")
+        return
+    webhook_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/setWebhook?url={RENDER_URL}/tg-webhook"
+    try:
+        res = requests.get(webhook_url).json()
+        print(f"📡 [TELEGRAM WEBHOOK REGISTRATION STATUS] : {res}")
+    except Exception as e:
+        print(f"❌ Webhook setups failed: {e}")
 
 @app.post("/tg-webhook")
 async def telegram_webhook_handler(request: Request):
@@ -74,7 +83,6 @@ async def telegram_webhook_handler(request: Request):
         chat_id = message["chat"]["id"]
         text = message.get("text", "").strip()
 
-        # Webhook Guard Configuration
         if ALLOWED_CHAT_ID and str(chat_id) != ALLOWED_CHAT_ID:
             print(f"🔒 [SECURITY] Unauthorized chat blocked: {chat_id}")
             return {"status": "unauthorized"}
@@ -87,7 +95,7 @@ async def telegram_webhook_handler(request: Request):
 
         if command == "/start":
             welcome_msg = (
-                "📊 RSI MATRIX SCANNER V14 BOOTED 📊\n\n"
+                "📊 RSI MATRIX SCANNER V17 BOOTED 📊\n\n"
                 "Available Commands:\n"
                 "🔹 /add COIN/USDT — Matrix me coin add karein\n"
                 "🔹 /remove COIN/USDT — Matrix se coin hatayein\n"
@@ -128,11 +136,6 @@ async def telegram_webhook_handler(request: Request):
     except Exception as err:
         print(f"❌ [WEBHOOK CORRUPTION ERROR] : {str(err)}")
     return {"status": "ok"}
-
-def start_render_health_gateway():
-    """Runs Uvicorn server on a background thread to satisfy Render's port binding."""
-    setup_telegram_webhook()
-    uvicorn.run(app, host="0.0.0.0", port=10000, log_level="warning")
 
 
 # ========================================================
@@ -234,6 +237,7 @@ class CompleteSentinelEngine:
         current_price, source_label, resolved_client, market_symbol = await self.fetch_exchange_data(symbol, gate_client, okx_client)
         
         if not current_price or not resolved_client:
+            print(f"❌ [SYMBOL FAIL MONITOR] FAILED SYMBOL => {symbol} (Could not resolve pricing on any pipeline node)")
             return None
 
         report = f"📊 RSI UPDATE: {symbol}\n"
@@ -286,13 +290,22 @@ class CompleteSentinelEngine:
             await okx_client['spot'].close()
 
     async def engine_core_loop(self):
-        """Continuous Automated 2-Minute Engine Core Loop"""
-        print("\n🔥 SYSTEM ACTIVE: CONTINUOUS 2-MINUTE TRACKING LOOP STARTING 🔥\n")
+        """Continuous Automated 2-Minute Engine Core Loop with Strict Auditing Logs"""
+        # FASTEST BOOT TEST TRIGGER POINT
+        print("⚡ [STARTUP AUDIT] AUTO LOOP ONLINE - Verifying initialization vectors...")
+        print(f"🛠️ [ENV VARIABLES DUMP] CHAT_ID = {ALLOWED_CHAT_ID} (Raw input from panel: {RAW_CHAT_ID})")
+        
+        if ALLOWED_CHAT_ID:
+            print("🚀 [STARTUP AUDIT] Dispatching immediate boot verification message to secure target channel...")
+            send_telegram_msg(int(ALLOWED_CHAT_ID), "✅ *AUTO LOOP STARTED SUCCESSFULLY*\nYour 120-second automated matrix sync engine is now strictly operational.")
         
         while True:
+            # Explicit Timestamp & Audit Logs inside iteration loop boundaries
+            print(f"🔄 [LOOP LOG] LOOP STARTED at Time Context: {datetime.now(timezone.utc)}")
+            print(f"🔑 [LOOP LOG] Tracking Variables Verified -> CHAT_ID = {ALLOWED_CHAT_ID}")
+            
             try:
-                # Strong Validation: Check if clean string version exists
-                if ALLOWED_CHAT_ID and ALLOWED_CHAT_ID != "None" and ALLOWED_CHAT_ID != "":
+                if ALLOWED_CHAT_ID:
                     target_int_id = int(ALLOWED_CHAT_ID)
                     
                     gate_client = {
@@ -308,6 +321,7 @@ class CompleteSentinelEngine:
                         with self.symbol_lock:
                             symbols = self.tracked_symbols.copy()
                         
+                        print(f"📋 [LOOP LOG] Target assets array checklist: {symbols}")
                         for symbol in symbols:
                             report = await self.process_single_symbol_report(symbol, gate_client, okx_client)
                             if report:
@@ -318,23 +332,34 @@ class CompleteSentinelEngine:
                         await okx_client['future'].close()
                         await okx_client['spot'].close()
                 else:
-                    print("⚠️ [LOOP SKIP] CHAT_ID env variable is not properly synchronized or missing.")
+                    print("⚠️ [LOOP LOG SKIP] Auto loop skipped broadcasting because CHAT_ID env variable is evaluated as None/Falsy object.")
                         
             except Exception as loop_err:
                 print(f"💥 Internal loop execution fault: {str(loop_err)}")
                 
-            await asyncio.sleep(120) # 2-Minute precise auto sync interval
+            print("⏳ [LOOP LOG] Entering 120 second precision sleep block sequence...")
+            await asyncio.sleep(120) 
 
-# ========================================================
-# 5. ENTRY POINT PROCESS ROUTER
-# ========================================================
-if __name__ == "__main__":
-    # Step 1: Initialize Engine System globally 
+
+# ==========================================
+# 4. MAIN ASYNC PROCESS LAUNCHER
+# ==========================================
+async def start_combined_services():
+    """Runs FastAPI Server and Trading Loop concurrently on a unified event loop"""
+    global engine_instance
     engine_instance = CompleteSentinelEngine()
+    setup_telegram_webhook()
 
-    # Step 2: Start Render Server along with Telegram Webhook on Daemon Thread
-    server_thread = threading.Thread(target=start_render_health_gateway, daemon=True)
-    server_thread.start()
-    
-    # Step 3: Run Quant Trading Loop
-    asyncio.run(engine_instance.engine_core_loop())
+    config = uvicorn.Config(app, host="0.0.0.0", port=10000, log_level="warning")
+    server = uvicorn.Server(config)
+
+    print("🚀 [LAUNCHER] Booting FastAPI Server and Trading Loop in parallel state...")
+    await asyncio.gather(
+        server.serve(),
+        engine_instance.engine_core_loop()
+    )
+
+
+if __name__ == "__main__":
+    # Standard top-level execution loop block mapping
+    asyncio.run(start_combined_services())
