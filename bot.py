@@ -24,7 +24,7 @@ def health_check():
     """Keeps the Render web service container alive."""
     return {
         "status": "ONLINE",
-        "engine": "RSI Dual-Exchange Matrix Scanner V10",
+        "engine": "RSI Debug Matrix Scanner V11",
         "timestamp": datetime.now(timezone.utc).isoformat()
     }
 
@@ -81,7 +81,7 @@ async def telegram_webhook_handler(request: Request):
 
         if command == "/start":
             welcome_msg = (
-                "📊 RSI MATRIX SCANNER V10 BOOTED 📊\n\n"
+                "📊 RSI MATRIX SCANNER V11 BOOTED 📊\n\n"
                 "Available Commands:\n"
                 "🔹 /add COIN/USDT — Matrix me coin add karein\n"
                 "🔹 /remove COIN/USDT — Matrix se coin hatayein\n"
@@ -150,53 +150,39 @@ class CompleteSentinelEngine:
             if symbol in self.tracked_symbols:
                 self.tracked_symbols.remove(symbol)
 
-    def calculate_rsi(self, df_ohlcv: List, period: int = 14) -> Optional[float]:
-        """Robust Market Parsing Architecture supporting structural mutations across CCXT networks"""
-        try:
-            if not df_ohlcv or len(df_ohlcv) < period + 2:
-                return None
-                
-            # Pandas integration for guaranteed index sequencing alignment
-            df = pd.DataFrame(df_ohlcv, columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
-            
-            # Data cleansing to ensure smooth calculation profiles
-            df['close'] = pd.to_numeric(df['close'], errors='coerce')
-            df = df.dropna(subset=['close'])
-            
-            if len(df) < period + 1:
-                return None
+    def calculate_rsi(self, closes: np.ndarray, symbol: str, tf: str) -> float:
+        """Bhai Ka Precise Fixed Pure Float RSI Calculation Logic with Wilder's Smoothing"""
+        # Array explicit conversion with float forced type casting
+        closes = np.asarray(closes, dtype=float)
 
-            closes = df['close'].values
-            delta = np.diff(closes)
-            
-            # Wilder's Smoothing Moving Average Logic Initialization
-            gains = np.where(delta > 0, delta, 0.0)
-            losses = np.where(delta < 0, -delta, 0.0)
-            
-            avg_gain = np.mean(gains[:period])
-            avg_loss = np.mean(losses[:period])
-            
-            for i in range(period, len(delta)):
-                avg_gain = (avg_gain * (period - 1) + gains[i]) / period
-                avg_loss = (avg_loss * (period - 1) + losses[i]) / period
-                
-            if avg_loss == 0:
-                return 100.0 if avg_gain > 0 else 50.0
-                
-            rs = avg_gain / avg_loss
-            rsi_val = 100.0 - (100.0 / (100.0 + rs))
-            
-            if np.isnan(rsi_val) or np.isinf(rsi_val):
-                return None
-                
-            return float(rsi_val)
-        except Exception:
-            return None
+        if len(closes) < 15: # Safety constraint check
+            return 50.0
 
-    def get_rsi_status(self, rsi_val: Optional[float]) -> str:
-        """Standard Boundary Matrix Labels with explicit failover handling"""
-        if rsi_val is None:
-            return "--.-  ⚪ MID"
+        delta = np.diff(closes)
+        gain = np.where(delta > 0, delta, 0.0)
+        loss = np.where(delta < 0, -delta, 0.0)
+
+        avg_gain = np.mean(gain[:14])
+        avg_loss = np.mean(loss[:14])
+
+        for i in range(14, len(gain)):
+            avg_gain = ((avg_gain * 13) + gain[i]) / 14
+            avg_loss = ((avg_loss * 13) + loss[i]) / 14
+
+        if avg_loss == 0:
+            return 100.0
+
+        rs = avg_gain / avg_loss
+        rsi = 100 - (100 / (1 + rs))
+
+        # Core Engine Math Console Tracking Debuggers
+        print(f"📊 [MATH DEBUG] {symbol} | {tf} | Candles Array Input Count: {len(closes)} | Last Close Price: {closes[-1]}")
+        print(f"📈 [MATH DEBUG] {symbol} | {tf} | Calculated Smooth RSI Value -> {round(float(rsi), 2)}")
+        
+        return round(float(rsi), 2)
+
+    def get_rsi_status(self, rsi_val: float) -> str:
+        """Standard Boundary Matrix Labels"""
         if rsi_val >= 70.0:
             return f"{rsi_val:.1f}  🔴 OB"
         elif rsi_val <= 30.0:
@@ -205,19 +191,19 @@ class CompleteSentinelEngine:
             return f"{rsi_val:.1f}  ⚪ MID"
 
     async def fetch_exchange_data(self, symbol: str, gate_client, okx_client) -> Tuple[Optional[float], Optional[str], Optional[object], str]:
-        """Prioritizes: Gate Future -> OKX Future -> Gate Spot -> OKX Spot"""
-        # 1. GATE FUTURE
+        """Prioritizes Core CCXT Standards: Gate Future -> OKX Future -> Gate Spot -> OKX Spot"""
+        # 1. GATE FUTURE (FIXED FORMAT: CCXT standard for gate futures is 'BTC/USDT:USDT')
         try:
-            gate_future_symbol = symbol.replace("/", "_")
+            gate_future_symbol = f"{symbol}:USDT" if not symbol.endswith(":USDT") else symbol
             ticker = await gate_client['future'].fetch_ticker(gate_future_symbol)
             if ticker and ticker.get('last'):
                 return float(ticker['last']), "Gate (FUTURE)", gate_client['future'], gate_future_symbol
         except Exception:
             pass
 
-        # 2. OKX FUTURE
+        # 2. OKX FUTURE (Standard format: 'BTC/USDT:USDT')
         try:
-            okx_future_symbol = symbol + ":USDT"
+            okx_future_symbol = f"{symbol}:USDT" if not symbol.endswith(":USDT") else symbol
             ticker = await okx_client['future'].fetch_ticker(okx_future_symbol)
             if ticker and ticker.get('last'):
                 return float(ticker['last']), "OKX (FUTURE)", okx_client['future'], okx_future_symbol
@@ -260,12 +246,28 @@ class CompleteSentinelEngine:
         
         for tf in self.timeframes:
             try:
-                # Limit sets to 150 candles for highly accurate Wilder exponential weight seeds
-                ohlcv = await resolved_client.fetch_ohlcv(market_symbol, tf, limit=150)
-                rsi_value = self.calculate_rsi(ohlcv)
+                # Core Engine Routing Console Logs Debugger
+                print(f"🔍 [ROUTING DEBUG] {symbol} | {tf} | Resolved Active Target Market String = {market_symbol}")
+                
+                ohlcv = await resolved_client.fetch_ohlcv(market_symbol, tf, limit=100)
+                
+                # Dynamic Candle Matrix Tail End Data Print
+                if ohlcv and len(ohlcv) >= 5:
+                    print(f"📦 [RAW OHLCV DEBUG - LAST 5 TAIL CANDLES] For Market node {market_symbol} ({tf}):")
+                    print(ohlcv[-5:])
+                else:
+                    print(f"⚠️ [RAW OHLCV DEBUG] Market node {market_symbol} ({tf}) returned insufficient/empty candles array.")
+
+                if not ohlcv or len(ohlcv) < 15:
+                    report += f"{tf:<5} │ --.-  ⚪ MID\n"
+                    continue
+
+                closes = np.array([float(x[4]) for x in ohlcv])
+                rsi_value = self.calculate_rsi(closes, symbol, tf)
                 status_str = self.get_rsi_status(rsi_value)
                 report += f"{tf:<5} │ {status_str}\n"
-            except Exception:
+            except Exception as ex:
+                print(f"❌ Error compiling candle metrics inside timeframe track {tf} for {symbol}: {ex}")
                 report += f"{tf:<5} │ --.-  ⚪ MID\n"
                 
         report += f"───────────────────\n"
@@ -304,7 +306,7 @@ class CompleteSentinelEngine:
 
     async def engine_core_loop(self):
         """Continuous Automated 2-Minute Dynamic Matrix System Broadcaster"""
-        print("\n🔥 SYSTEM ACTIVE: FALLBACK STRUCTURE INTEGRATED FOR GATE & OKX (2M TICK) 🔥\n")
+        print("\n🔥 SYSTEM ACTIVE: FALLBACK STRUCTURE LIVE WITH DUAL EXCH FIXED STRINGS 🔥\n")
         
         while True:
             try:
