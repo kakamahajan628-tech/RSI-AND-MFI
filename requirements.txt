@@ -4,3 +4,4 @@ ccxt>=4.1.0
 asyncio>=3.4.3
 uvicorn>=0.22.0
 fastapi>=0.95.0
+httpx>=0.24.0
