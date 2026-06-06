@@ -5,23 +5,63 @@ import asyncio
 import sqlite3
 import uvicorn
 import threading
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from datetime import datetime, timezone
 from typing import List, Dict, Optional, Tuple
 
 # ==========================================
-# 0. RENDER HEALTH CHECK SERVER (FASTAPI)
+# 0. RENDER HEALTH CHECK & CONTROL SERVER (FASTAPI)
 # ==========================================
 app = FastAPI()
+
+# Global engine reference taaki endpoints isse access kar sakein
+sentinel_engine = None
 
 @app.get("/")
 def health_check():
     """Keeps the Render web service container alive."""
+    global sentinel_engine
+    tracked = sentinel_engine.tracked_symbols if sentinel_engine else []
     return {
         "status": "ONLINE",
         "engine": "The Quantum-Sentinel V8",
-        "timestamp": datetime.now(timezone.utc).isoformat()
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "currently_tracking": tracked
     }
+
+@app.get("/tracked")
+def get_tracked_coins():
+    """Returns the list of currently tracked symbols."""
+    if not sentinel_engine:
+        raise HTTPException(status_code=503, detail="Engine not initialized yet")
+    return {"tracked_symbols": sentinel_engine.tracked_symbols}
+
+@app.post("/add_coin")
+def add_coin(symbol: str):
+    """Adds a coin to the dynamic tracking list (Format: BTC/USDT)."""
+    if not sentinel_engine:
+        raise HTTPException(status_code=503, detail="Engine not initialized yet")
+    
+    symbol_upper = symbol.upper().strip()
+    if symbol_upper in sentinel_engine.tracked_symbols:
+        return {"message": f"⚠️ {symbol_upper} is already being tracked.", "tracked_symbols": sentinel_engine.tracked_symbols}
+    
+    sentinel_engine.tracked_symbols.append(symbol_upper)
+    return {"message": f"✅ Successfully added {symbol_upper} to tracking list.", "tracked_symbols": sentinel_engine.tracked_symbols}
+
+@app.post("/remove_coin")
+def remove_coin(symbol: str):
+    """Removes/Stops tracking a coin (Format: BTC/USDT)."""
+    if not sentinel_engine:
+        raise HTTPException(status_code=503, detail="Engine not initialized yet")
+    
+    symbol_upper = symbol.upper().strip()
+    if symbol_upper not in sentinel_engine.tracked_symbols:
+        raise HTTPException(status_code=404, detail=f"{symbol_upper} is not in the tracking list.")
+    
+    sentinel_engine.tracked_symbols.remove(symbol_upper)
+    return {"message": f"🛑 Successfully removed/stopped tracking {symbol_upper}.", "tracked_symbols": sentinel_engine.tracked_symbols}
+
 
 def start_render_health_gateway():
     """Runs Uvicorn server on a background thread to satisfy Render's port binding."""
@@ -300,7 +340,6 @@ class CompleteSentinelEngine:
 
     async def engine_core_loop(self):
         """Infinite tracking execution loop running every 5 minutes."""
-        # Initial Boot Message Banner
         print("\n" + "="*60)
         print(" 🔥 THE QUANT-SENTINEL V8 ENGINE INITIALIZED SUCCESSFULLY 🔥")
         print("="*60)
@@ -313,8 +352,12 @@ class CompleteSentinelEngine:
         exchange_client = ccxt.okx({"enableRateLimit": True})
         try:
             while True:
-                for symbol in self.tracked_symbols:
-                    await self.process_market_execution(symbol, exchange_client)
+                # Runtime par loop ke dauran coin add/remove safely handle karne ke liye list ki copy li hai
+                current_symbols = list(self.tracked_symbols)
+                for symbol in current_symbols:
+                    # Double check agar loop chalne ke dauran hi coin remove ho gaya ho
+                    if symbol in self.tracked_symbols:
+                        await self.process_market_execution(symbol, exchange_client)
                 await asyncio.sleep(300) # Tick sequence: 5 minutes
         except Exception as loop_err:
             print(f"💥 Critical Error in main execution engine loop: {str(loop_err)}")
@@ -325,9 +368,12 @@ class CompleteSentinelEngine:
 # 5. ENTRY POINT PROCESS ROUTER
 # ========================================================
 if __name__ == "__main__":
-    # Step 1: Start Render health validation proxy on background daemon thread
+    # Step 1: Initialize global engine object so FastAPI can control it
+    sentinel_engine = CompleteSentinelEngine()
+
+    # Step 2: Start Render health validation proxy on background daemon thread
     server_thread = threading.Thread(target=start_render_health_gateway, daemon=True)
     server_thread.start()
     
-    # Step 2: Fire Up Main Async Quant Processing Core Pipeline
-    asyncio.run(CompleteSentinelEngine().engine_core_loop())
+    # Step 3: Fire Up Main Async Quant Processing Core Pipeline
+    asyncio.run(sentinel_engine.engine_core_loop())
