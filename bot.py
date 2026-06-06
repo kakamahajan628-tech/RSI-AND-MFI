@@ -230,9 +230,8 @@ class CompleteSentinelEngine:
     def __init__(self):
         self.db = AdvancedSignalDatabase()
         self.structure_engine = StructuralStateEngine()
-        self.tracked_symbols = ["BTC/USDT", "ETH/USDT"] # Dynamic Token Tracking list
+        self.tracked_symbols = ["BTC/USDT", "ETH/USDT"]
 
-    # METHOD: Coin list se terminate/remove karne ke liye
     def remove_coin(self, symbol: str):
         symbol = symbol.upper()
         if symbol in self.tracked_symbols:
@@ -241,7 +240,6 @@ class CompleteSentinelEngine:
         else:
             print(f"⚠️ [ERROR] {symbol} is not in the active tracking list.")
 
-    # METHOD: Naya coin list me add karne ke liye
     def add_coin(self, symbol: str):
         symbol = symbol.upper()
         if symbol not in self.tracked_symbols:
@@ -318,23 +316,23 @@ class CompleteSentinelEngine:
 
     async def engine_core_loop(self):
         """Infinite tracking execution loop running every 5 minutes."""
-        # Initial Boot Message Banner
+        # Visual Startup Message Banner
         print("\n" + "="*60)
         print(" 🔥 THE QUANT-SENTINEL V8 ENGINE INITIALIZED SUCCESSFULLY 🔥")
         print("="*60)
         print(f"➔ Boot Timestamp : {datetime.now(timezone.utc).isoformat()}")
         print("➔ Network Mode   : CCXT Async Engine Connected")
         print("➔ Guard Server   : FastAPI Live Gateway Port 10000 Active")
+        print("➔ Target Nodes   : {self.tracked_symbols}")
         print("➔ Engine Sandbox : Multi-Timeframe Bayesian Optimization Active")
         print("="*60 + "\n")
 
         exchange_client = ccxt.okx({"enableRateLimit": True})
         try:
             while True:
-                # REFINEMENT: `list(...)` use kiya hai taaki live loops me element remove karne se track crash na kare
                 for symbol in list(self.tracked_symbols):
                     await self.process_market_execution(symbol, exchange_client)
-                await asyncio.sleep(300) # Tick sequence: 5 minutes
+                await asyncio.sleep(300)
         except Exception as loop_err:
             print(f"💥 Critical Error in main execution engine loop: {str(loop_err)}")
         finally:
@@ -344,9 +342,7 @@ class CompleteSentinelEngine:
 # 5. ENTRY POINT PROCESS ROUTER
 # ========================================================
 if __name__ == "__main__":
-    # Step 1: Start Render health validation proxy on background daemon thread
     server_thread = threading.Thread(target=start_render_health_gateway, daemon=True)
     server_thread.start()
     
-    # Step 2: Fire Up Main Async Quant Processing Core Pipeline
     asyncio.run(CompleteSentinelEngine().engine_core_loop())
