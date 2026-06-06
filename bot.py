@@ -5,9 +5,32 @@ import asyncio
 import sqlite3
 import uvicorn
 import threading
+import os
+import httpx  # Render production ke liye efficient async HTTP client
 from fastapi import FastAPI
 from datetime import datetime, timezone
 from typing import List, Dict, Optional, Tuple
+
+# ==========================================
+# TELEGRAM CONFIGURATION (FROM ENVIRONMENT)
+# ==========================================
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "YOUR_DEFAULT_TOKEN_IF_ANY")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "YOUR_DEFAULT_ID_IF_ANY")
+
+async def send_telegram_alert(message: str):
+    """Sends async telegram notifications without blocking the core quantitative loop."""
+    if not TELEGRAM_BOT_TOKEN or "YOUR" in TELEGRAM_BOT_TOKEN:
+        print("⚠️ [TELEGRAM_GUARD] Bot token missing or unset in Environment Variables.")
+        return
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "Markdown"}
+        async with httpx.AsyncClient() as client:
+            response = await client.post(url, json=payload, timeout=10.0)
+            if response.status_code != 200:
+                print(f"⚠️ Telegram API broadcast failed: {response.text}")
+    except Exception as e:
+        print(f"❌ Telegram pipeline exception handler caught: {str(e)}")
 
 # ==========================================
 # 0. RENDER HEALTH CHECK SERVER (FASTAPI)
@@ -25,6 +48,7 @@ def health_check():
 
 def start_render_health_gateway():
     """Runs Uvicorn server on a background thread to satisfy Render's port binding."""
+    # Render variables automatically inject port 10000 natively
     uvicorn.run(app, host="0.0.0.0", port=10000, log_level="warning")
 
 # ==========================================
@@ -309,6 +333,19 @@ class CompleteSentinelEngine:
                 print(f"➔ Execution Matrix -> Entry: {entry} | SL: {sl:.2f} | TP: {tp:.2f}")
                 print(f"📊 BAYESIAN RESOLUTION CONFLUENCE: {confidence_index:.2f}% CONFIDENCE.")
                 print(f"==========================================================\n")
+                
+                # Telegram Markdown Structured Alert
+                tg_alert_payload = (
+                    f"🚨 *[V8 SIGNAL TRIGGERED]* 🚨\n\n"
+                    f"➔ *Asset Node:* `{symbol}`\n"
+                    f"➔ *Direction:* `SHORT` 🔴\n"
+                    f"➔ *Session Focus:* {session_name}\n"
+                    f"➔ *Entry Execution:* `{entry}`\n"
+                    f"➔ *Stop Loss Profile:* `{sl:.2f}`\n"
+                    f"➔ *Take Profit Targets:* `{tp:.2f}`\n\n"
+                    f"📊 *Bayesian Confluence Index:* `{confidence_index:.2f}%` Confidence"
+                )
+                await send_telegram_alert(tg_alert_payload)
             else:
                 print(f"⏳ [SCANNER] {symbol} | Matrix Score: {confidence_index:.2f}% | Searching setup...")
         except Exception as err:
@@ -316,16 +353,19 @@ class CompleteSentinelEngine:
 
     async def engine_core_loop(self):
         """Infinite tracking execution loop running every 5 minutes."""
-        # Visual Startup Message Banner
         print("\n" + "="*60)
         print(" 🔥 THE QUANT-SENTINEL V8 ENGINE INITIALIZED SUCCESSFULLY 🔥")
         print("="*60)
         print(f"➔ Boot Timestamp : {datetime.now(timezone.utc).isoformat()}")
         print("➔ Network Mode   : CCXT Async Engine Connected")
         print("➔ Guard Server   : FastAPI Live Gateway Port 10000 Active")
-        print("➔ Target Nodes   : {self.tracked_symbols}")
+        print(f"➔ Target Nodes   : {self.tracked_symbols}")
         print("➔ Engine Sandbox : Multi-Timeframe Bayesian Optimization Active")
         print("="*60 + "\n")
+
+        # Bot start hote hi Telegram par initialization alert jayega
+        boot_msg = f"🟢 *Quant-Sentinel V8 Engine Online*\n⚡ Monitoring Assets: `{self.tracked_symbols}`\n📡 Render Web Gateway Active."
+        await send_telegram_alert(boot_msg)
 
         exchange_client = ccxt.okx({"enableRateLimit": True})
         try:
