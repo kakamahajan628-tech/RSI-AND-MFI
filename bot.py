@@ -5,32 +5,9 @@ import asyncio
 import sqlite3
 import uvicorn
 import threading
-import os
-import httpx  # Render production ke liye efficient async HTTP client
 from fastapi import FastAPI
 from datetime import datetime, timezone
 from typing import List, Dict, Optional, Tuple
-
-# ==========================================
-# TELEGRAM CONFIGURATION (FROM ENVIRONMENT)
-# ==========================================
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "YOUR_DEFAULT_TOKEN_IF_ANY")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "YOUR_DEFAULT_ID_IF_ANY")
-
-async def send_telegram_alert(message: str):
-    """Sends async telegram notifications without blocking the core quantitative loop."""
-    if not TELEGRAM_BOT_TOKEN or "YOUR" in TELEGRAM_BOT_TOKEN:
-        print("⚠️ [TELEGRAM_GUARD] Bot token missing or unset in Environment Variables.")
-        return
-    try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "Markdown"}
-        async with httpx.AsyncClient() as client:
-            response = await client.post(url, json=payload, timeout=10.0)
-            if response.status_code != 200:
-                print(f"⚠️ Telegram API broadcast failed: {response.text}")
-    except Exception as e:
-        print(f"❌ Telegram pipeline exception handler caught: {str(e)}")
 
 # ==========================================
 # 0. RENDER HEALTH CHECK SERVER (FASTAPI)
@@ -48,7 +25,6 @@ def health_check():
 
 def start_render_health_gateway():
     """Runs Uvicorn server on a background thread to satisfy Render's port binding."""
-    # Render variables automatically inject port 10000 natively
     uvicorn.run(app, host="0.0.0.0", port=10000, log_level="warning")
 
 # ==========================================
@@ -254,23 +230,45 @@ class CompleteSentinelEngine:
     def __init__(self):
         self.db = AdvancedSignalDatabase()
         self.structure_engine = StructuralStateEngine()
-        self.tracked_symbols = ["BTC/USDT", "ETH/USDT"]
-
-    def remove_coin(self, symbol: str):
-        symbol = symbol.upper()
-        if symbol in self.tracked_symbols:
-            self.tracked_symbols.remove(symbol)
-            print(f"➖ [STOPPED] Logic for {symbol} has been terminated.")
-        else:
-            print(f"⚠️ [ERROR] {symbol} is not in the active tracking list.")
+        self.tracked_symbols = ["BTC/USDT", "ETH/USDT"] # Dynamic Token Tracking list
+        self.symbol_lock = threading.Lock() # Thread-safe operations control
 
     def add_coin(self, symbol: str):
-        symbol = symbol.upper()
-        if symbol not in self.tracked_symbols:
-            self.tracked_symbols.append(symbol)
-            print(f"➕ [STARTED] {symbol} is now being monitored by V8 Engine.")
-        else:
-            print(f"⚠️ [INFO] {symbol} is already being tracked.")
+        symbol = symbol.upper().strip()
+        with self.symbol_lock:
+            if symbol not in self.tracked_symbols:
+                self.tracked_symbols.append(symbol)
+                print(f"✅ Coin Added for Scanning: {symbol}")
+            else:
+                print(f"⚠️ {symbol} already exists in tracking matrix.")
+
+    def remove_coin(self, symbol: str):
+        symbol = symbol.upper().strip()
+        with self.symbol_lock:
+            if symbol in self.tracked_symbols:
+                self.tracked_symbols.remove(symbol)
+                print(f"🗑️ Tracking Stopped & Coin Removed: {symbol}")
+            else:
+                print(f"❌ Coin not found in active matrix: {symbol}")
+
+    def command_listener(self):
+        while True:
+            try:
+                cmd = input().strip()
+                if cmd.startswith("add "):
+                    coin = cmd.split(" ", 1)[1]
+                    self.add_coin(coin)
+                elif cmd.startswith("remove "):
+                    coin = cmd.split(" ", 1)[1]
+                    self.remove_coin(coin)
+                elif cmd == "list":
+                    with self.symbol_lock:
+                        print("\n📋 Current Active Tracked Coins:")
+                        for coin in self.tracked_symbols:
+                            print(f" - {coin}")
+                        print("")
+            except Exception as e:
+                print(f"Command Execution Error: {e}")
 
     async def process_market_execution(self, symbol: str, exchange: ccxt.Exchange):
         allowed, session_name = SessionKillzoneFilter.check_killzone()
@@ -333,19 +331,6 @@ class CompleteSentinelEngine:
                 print(f"➔ Execution Matrix -> Entry: {entry} | SL: {sl:.2f} | TP: {tp:.2f}")
                 print(f"📊 BAYESIAN RESOLUTION CONFLUENCE: {confidence_index:.2f}% CONFIDENCE.")
                 print(f"==========================================================\n")
-                
-                # Telegram Markdown Structured Alert
-                tg_alert_payload = (
-                    f"🚨 *[V8 SIGNAL TRIGGERED]* 🚨\n\n"
-                    f"➔ *Asset Node:* `{symbol}`\n"
-                    f"➔ *Direction:* `SHORT` 🔴\n"
-                    f"➔ *Session Focus:* {session_name}\n"
-                    f"➔ *Entry Execution:* `{entry}`\n"
-                    f"➔ *Stop Loss Profile:* `{sl:.2f}`\n"
-                    f"➔ *Take Profit Targets:* `{tp:.2f}`\n\n"
-                    f"📊 *Bayesian Confluence Index:* `{confidence_index:.2f}%` Confidence"
-                )
-                await send_telegram_alert(tg_alert_payload)
             else:
                 print(f"⏳ [SCANNER] {symbol} | Matrix Score: {confidence_index:.2f}% | Searching setup...")
         except Exception as err:
@@ -359,20 +344,19 @@ class CompleteSentinelEngine:
         print(f"➔ Boot Timestamp : {datetime.now(timezone.utc).isoformat()}")
         print("➔ Network Mode   : CCXT Async Engine Connected")
         print("➔ Guard Server   : FastAPI Live Gateway Port 10000 Active")
-        print(f"➔ Target Nodes   : {self.tracked_symbols}")
         print("➔ Engine Sandbox : Multi-Timeframe Bayesian Optimization Active")
         print("="*60 + "\n")
-
-        # Bot start hote hi Telegram par initialization alert jayega
-        boot_msg = f"🟢 *Quant-Sentinel V8 Engine Online*\n⚡ Monitoring Assets: `{self.tracked_symbols}`\n📡 Render Web Gateway Active."
-        await send_telegram_alert(boot_msg)
 
         exchange_client = ccxt.okx({"enableRateLimit": True})
         try:
             while True:
-                for symbol in list(self.tracked_symbols):
+                # Local copy banate hain dynamic change handle karne ke liye loop ke dauran
+                with self.symbol_lock:
+                    symbols = self.tracked_symbols.copy()
+
+                for symbol in symbols:
                     await self.process_market_execution(symbol, exchange_client)
-                await asyncio.sleep(300)
+                await asyncio.sleep(300) # Tick sequence: 5 minutes
         except Exception as loop_err:
             print(f"💥 Critical Error in main execution engine loop: {str(loop_err)}")
         finally:
@@ -382,7 +366,15 @@ class CompleteSentinelEngine:
 # 5. ENTRY POINT PROCESS ROUTER
 # ========================================================
 if __name__ == "__main__":
+    # Step 1: Start Render health validation proxy on background daemon thread
     server_thread = threading.Thread(target=start_render_health_gateway, daemon=True)
     server_thread.start()
     
-    asyncio.run(CompleteSentinelEngine().engine_core_loop())
+    # Step 2: Initialize engine instance
+    engine = CompleteSentinelEngine()
+
+    # Step 3: Run Command Listener in separate Background Thread
+    threading.Thread(target=engine.command_listener, daemon=True).start()
+    
+    # Step 4: Fire Up Main Async Quant Processing Core Pipeline
+    asyncio.run(engine.engine_core_loop())
