@@ -24,7 +24,7 @@ def health_check():
     """Keeps the Render web service container alive."""
     return {
         "status": "ONLINE",
-        "engine": "RSI-MFI Matrix Scanner V8",
+        "engine": "RSI Dual-Exchange Matrix Scanner V9",
         "timestamp": datetime.now(timezone.utc).isoformat()
     }
 
@@ -81,12 +81,12 @@ async def telegram_webhook_handler(request: Request):
 
         if command == "/start":
             welcome_msg = (
-                "📊 RSI & MFI MATRIX SCANNER BOOTED 📊\n\n"
+                "📊 RSI MATRIX SCANNER V9 BOOTED 📊\n\n"
                 "Available Commands:\n"
                 "🔹 /add COIN/USDT — Matrix me coin add karein\n"
                 "🔹 /remove COIN/USDT — Matrix se coin hatayein\n"
                 "🔹 /list — Active tracked matrix coins dekhein\n"
-                "🔹 /scan — Instant pure matrix ka RSI update paayein"
+                "🔹 /scan — Instant dynamic fallback matrix update paayein"
             )
             send_telegram_msg(chat_id, welcome_msg)
 
@@ -97,7 +97,7 @@ async def telegram_webhook_handler(request: Request):
                 coin = parts[1].upper()
                 if engine_instance:
                     engine_instance.add_coin(coin)
-                    send_telegram_msg(chat_id, f"✅ Scalper Activated for: {coin}")
+                    send_telegram_msg(chat_id, f"✅ Asset Matrix Element Added: {coin}")
 
         elif command == "/remove":
             if len(parts) < 2:
@@ -116,7 +116,7 @@ async def telegram_webhook_handler(request: Request):
 
         elif command == "/scan":
             if engine_instance:
-                send_telegram_msg(chat_id, "🔍 Fetching Gate.io Futures Matrix Pipeline... Please wait.")
+                send_telegram_msg(chat_id, "🔍 Fetching Cross-Exchange Data Pipeline... Please wait.")
                 asyncio.create_task(engine_instance.trigger_instant_scan(chat_id))
 
     except Exception as err:
@@ -130,11 +130,11 @@ def start_render_health_gateway():
 
 
 # ========================================================
-# 2. CORE RSI & PRICE CALCULATION ENGINE
+# 2. CORE RSI & MULTI-EXCHANGE ROUTING ENGINE
 # ========================================================
 class CompleteSentinelEngine:
     def __init__(self):
-        self.tracked_symbols = ["BTC/USDT", "ETH/USDT", "SOL/USDT"] 
+        self.tracked_symbols = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "BB/USDT", "LAB/USDT", "BEAT/USDT"] 
         self.symbol_lock = threading.Lock() 
         self.timeframes = ['5m', '15m', '1h', '4h']
 
@@ -150,28 +150,45 @@ class CompleteSentinelEngine:
             if symbol in self.tracked_symbols:
                 self.tracked_symbols.remove(symbol)
 
-    def calculate_rsi(self, prices, period=14) -> float:
-        """Standard Technical RSI Formula"""
-        if len(prices) < period + 1:
+    def calculate_rsi(self, closes: np.ndarray, period: int = 14) -> float:
+        """Standard Wilder's Moving Average RSI Calculation to prevent 99.0 Skewness"""
+        if len(closes) < period + 1:
             return 50.0
-        delta = np.diff(prices)
-        gain = np.where(delta > 0, delta, 0.0)
-        loss = np.where(delta < 0, -delta, 0.0)
         
-        avg_gain = np.mean(gain[:period])
-        avg_loss = np.mean(loss[:period])
+        delta = np.diff(closes)
+        seed = delta[:period]
+        up = seed[seed >= 0].sum() / period
+        down = -seed[seed < 0].sum() / period
         
+        if down == 0:
+            rs = 100.0
+        else:
+            rs = up / down
+        rsi = np.zeros_like(closes)
+        rsi[:period] = 100.0 - (100.0 / (100.0 + rs))
+
         for i in range(period, len(delta)):
-            avg_gain = (avg_gain * (period - 1) + gain[i]) / period
-            avg_loss = (avg_loss * (period - 1) + loss[i]) / period
+            diff = delta[i]
+            if diff > 0:
+                upval = diff
+                downval = 0.0
+            else:
+                upval = 0.0
+                downval = -diff
+                
+            up = (up * (period - 1) + upval) / period
+            down = (down * (period - 1) + downval) / period
             
-        if avg_loss == 0:
-            return 100.0
-        rs = avg_gain / avg_loss
-        return float(100.0 - (100.0 / (100.0 + rs)))
+            if down == 0:
+                rs = 100.0
+            else:
+                rs = up / down
+            rsi[i] = 100.0 - (100.0 / (100.0 + rs))
+            
+        return float(rsi[-1])
 
     def get_rsi_status(self, rsi_val: float) -> str:
-        """Returns status flag strings exactly as expected"""
+        """Standard Boundary Matrix Labels"""
         if rsi_val >= 70.0:
             return f"{rsi_val:.1f}  🔴 OB"
         elif rsi_val <= 30.0:
@@ -179,25 +196,60 @@ class CompleteSentinelEngine:
         else:
             return f"{rsi_val:.1f}  ⚪ MID"
 
-    async def fetch_asset_matrix_report(self, symbol: str, exchange: ccxt.Exchange) -> Optional[str]:
-        """Fetches full multi-timeframe state profile for a coin"""
+    async def fetch_exchange_data(self, symbol: str, gate_client, okx_client) -> Tuple[Optional[float], Optional[str], Optional[object], str]:
+        """Prioritizes: Gate Future -> OKX Future -> Gate Spot -> OKX Spot"""
+        # 1. GATE FUTURE
         try:
-            # Gate.io futures format compatibility (e.g., SOL/USDT -> SOL_USDT)
-            gate_symbol = symbol.replace("/", "_")
-            
-            # Current Price Engine
-            ticker = await exchange.fetch_ticker(gate_symbol)
-            current_price = ticker.get('last', 0.0)
-            
-            report = f"📊 RSI UPDATE: {symbol}\n"
-            report += f"💵 Price: ${current_price:,.4f}\n"
-            report += f"🏛 Source: Gate (FUTURE)\n"
-            report += f"───────────────────\n"
-            report += f"TF    │ RSI (14)\n"
-            report += f"───────────────────\n"
-            
-            for tf in self.timeframes:
-                ohlcv = await exchange.fetch_ohlcv(gate_symbol, tf, limit=50)
+            gate_future_symbol = symbol.replace("/", "_")
+            ticker = await gate_client['future'].fetch_ticker(gate_future_symbol)
+            return ticker.get('last', 0.0), "Gate (FUTURE)", gate_client['future'], gate_future_symbol
+        except Exception:
+            pass
+
+        # 2. OKX FUTURE
+        try:
+            okx_future_symbol = symbol + ":USDT"
+            ticker = await okx_client['future'].fetch_ticker(okx_future_symbol)
+            return ticker.get('last', 0.0), "OKX (FUTURE)", okx_client['future'], okx_future_symbol
+        except Exception:
+            pass
+
+        # 3. GATE SPOT
+        try:
+            gate_spot_symbol = symbol
+            ticker = await gate_client['spot'].fetch_ticker(gate_spot_symbol)
+            return ticker.get('last', 0.0), "Gate (SPOT)", gate_client['spot'], gate_spot_symbol
+        except Exception:
+            pass
+
+        # 4. OKX SPOT
+        try:
+            okx_spot_symbol = symbol
+            ticker = await okx_client['spot'].fetch_ticker(okx_spot_symbol)
+            return ticker.get('last', 0.0), "OKX (SPOT)", okx_client['spot'], okx_spot_symbol
+        except Exception:
+            pass
+
+        return None, None, None, symbol
+
+    async def process_single_symbol_report(self, symbol: str, gate_client, okx_client) -> Optional[str]:
+        """Generates the text output block for a single tracking symbol"""
+        current_price, source_label, resolved_client, market_symbol = await self.fetch_exchange_data(symbol, gate_client, okx_client)
+        
+        if not current_price or not resolved_client:
+            return None
+
+        report = f"📊 RSI UPDATE: {symbol}\n"
+        report += f"💵 Price: ${current_price:,.4f}\n"
+        report += f"🏛 Source: {source_label}\n"
+        report += f"───────────────────\n"
+        report += f"TF    │ RSI (14)\n"
+        report += f"───────────────────\n"
+        
+        for tf in self.timeframes:
+            try:
+                # Historical candle limit badha di taaki RSI zero/99 edge scenarios accurate ho sakein
+                ohlcv = await resolved_client.fetch_ohlcv(market_symbol, tf, limit=100)
                 if len(ohlcv) < 20:
                     report += f"{tf:<5} │ --.0  ⚪ MID\n"
                     continue
@@ -205,59 +257,81 @@ class CompleteSentinelEngine:
                 rsi_value = self.calculate_rsi(closes)
                 status_str = self.get_rsi_status(rsi_value)
                 report += f"{tf:<5} │ {status_str}\n"
+            except Exception:
+                report += f"{tf:<5} │ --.0  ⚪ MID\n"
                 
-            report += f"───────────────────\n"
-            return report
-        except Exception as e:
-            print(f"❌ Error fetching analytics for {symbol}: {e}")
-            return None
+        report += f"───────────────────\n"
+        return report
 
     async def trigger_instant_scan(self, chat_id: int):
-        """Sends immediate status metrics to client user on demand"""
-        exchange_client = ccxt.gate({"options": {"defaultType": "swap"}, "enableRateLimit": True})
+        """On-Demand trigger for processing pipeline data via Telegram commands"""
+        gate_client = {
+            'future': ccxt.gate({"options": {"defaultType": "swap"}, "enableRateLimit": True}),
+            'spot': ccxt.gate({"options": {"defaultType": "spot"}, "enableRateLimit": True})
+        }
+        okx_client = {
+            'future': ccxt.okx({"options": {"defaultType": "swap"}, "enableRateLimit": True}),
+            'spot': ccxt.okx({"options": {"defaultType": "spot"}, "enableRateLimit": True})
+        }
+        
         try:
             with self.symbol_lock:
                 symbols = self.tracked_symbols.copy()
             
             final_report = ""
             for symbol in symbols:
-                report = await self.fetch_asset_matrix_report(symbol, exchange_client)
+                report = await self.process_single_symbol_report(symbol, gate_client, okx_client)
                 if report:
                     final_report += report + "\n"
             
             if final_report:
                 send_telegram_msg(chat_id, final_report.strip())
             else:
-                send_telegram_msg(chat_id, "❌ Verification stream failed. Check if asset names match Gate.io syntax.")
+                send_telegram_msg(chat_id, "❌ Verification across both exchanges failed. Validate matrix asset tickers.")
         finally:
-            await exchange_client.close()
+            await gate_client['future'].close()
+            await gate_client['spot'].close()
+            await okx_client['future'].close()
+            await okx_client['spot'].close()
 
     async def engine_core_loop(self):
-        """Automated 5-Minute Continuous Matrix Broadcaster"""
-        print("\n🔥 RSI-MFI SCANNER ACTIVE ON GATE.IO FUTURES API 🔥\n")
-        exchange_client = ccxt.gate({"options": {"defaultType": "swap"}, "enableRateLimit": True})
+        """Continuous Automated 2-Minute Dynamic Matrix System Broadcaster"""
+        print("\n🔥 SYSTEM ACTIVE: FALLBACK STRUCTURE INTEGRATED FOR GATE & OKX (2M TICK) 🔥\n")
         
-        try:
-            while True:
-                # Agar automatic 5-min me alerts bhejne hain toh CHAT_ID variables configured hona chahiye
+        while True:
+            try:
                 if ALLOWED_CHAT_ID:
-                    with self.symbol_lock:
-                        symbols = self.tracked_symbols.copy()
+                    gate_client = {
+                        'future': ccxt.gate({"options": {"defaultType": "swap"}, "enableRateLimit": True}),
+                        'spot': ccxt.gate({"options": {"defaultType": "spot"}, "enableRateLimit": True})
+                    }
+                    okx_client = {
+                        'future': ccxt.okx({"options": {"defaultType": "swap"}, "enableRateLimit": True}),
+                        'spot': ccxt.okx({"options": {"defaultType": "spot"}, "enableRateLimit": True})
+                    }
                     
-                    final_report = ""
-                    for symbol in symbols:
-                        report = await self.fetch_asset_matrix_report(symbol, exchange_client)
-                        if report:
-                            final_report += report + "\n"
-                    
-                    if final_report:
-                        send_telegram_msg(int(ALLOWED_CHAT_ID), final_report.strip())
+                    try:
+                        with self.symbol_lock:
+                            symbols = self.tracked_symbols.copy()
+                        
+                        final_report = ""
+                        for symbol in symbols:
+                            report = await self.process_single_symbol_report(symbol, gate_client, okx_client)
+                            if report:
+                                final_report += report + "\n"
+                        
+                        if final_report:
+                            send_telegram_msg(int(ALLOWED_CHAT_ID), final_report.strip())
+                    finally:
+                        await gate_client['future'].close()
+                        await gate_client['spot'].close()
+                        await okx_client['future'].close()
+                        await okx_client['spot'].close()
+                        
+            except Exception as loop_err:
+                print(f"💥 Internal loop execution fault: {str(loop_err)}")
                 
-                await asyncio.sleep(300) # Automated 5-minute tracking check
-        except Exception as loop_err:
-            print(f"💥 Critical Loop Error: {str(loop_err)}")
-        finally:
-            await exchange_client.close()
+            await asyncio.sleep(120) # Pure 2 Minutes Auto-Update sequence
 
 # ========================================================
 # 5. ENTRY POINT PROCESS ROUTER
