@@ -25,7 +25,7 @@ log = logging.getLogger("SENTINEL")
 # ================================================================
 # VERSION
 # ================================================================
-BOT_VERSION = "V22.0"
+BOT_VERSION = "V22.1"
 BOT_NAME    = f"SENTINEL MATRIX ENGINE {BOT_VERSION}"
 
 # ================================================================
@@ -48,7 +48,7 @@ OHLCV_LIMIT   = 500   # larger window → RSI convergence accuracy
 # SQLITE PERSISTENCE  (not /tmp — survives redeploy)
 # ================================================================
 def db_init():
-    con = sqlite3.connect(DB_PATH)
+    con = sqlite3.connect(DB_PATH, timeout=20)
     con.execute("CREATE TABLE IF NOT EXISTS coins (symbol TEXT PRIMARY KEY)")
     defaults = ["BTC/USDT","ETH/USDT","SOL/USDT","BB/USDT","LAB/USDT","BEAT/USDT"]
     for s in defaults:
@@ -56,18 +56,18 @@ def db_init():
     con.commit(); con.close()
 
 def db_load() -> List[str]:
-    con = sqlite3.connect(DB_PATH)
+    con = sqlite3.connect(DB_PATH, timeout=20)
     rows = con.execute("SELECT symbol FROM coins").fetchall()
     con.close()
     return [r[0] for r in rows]
 
 def db_add(symbol: str):
-    con = sqlite3.connect(DB_PATH)
+    con = sqlite3.connect(DB_PATH, timeout=20)
     con.execute("INSERT OR IGNORE INTO coins VALUES (?)", (symbol,))
     con.commit(); con.close()
 
 def db_remove(symbol: str):
-    con = sqlite3.connect(DB_PATH)
+    con = sqlite3.connect(DB_PATH, timeout=20)
     con.execute("DELETE FROM coins WHERE symbol=?", (symbol,))
     con.commit(); con.close()
 
@@ -262,7 +262,7 @@ class CompleteSentinelEngine:
         # Persistent CCXT clients — instantiated once, connection-pooled
         swap = {"options":{"defaultType":"swap"},"enableRateLimit":True}
         spot = {"options":{"defaultType":"spot"},"enableRateLimit":True}
-        self.gate = {'future': ccxt.gateio(swap), 'spot': ccxt.gateio(spot)}
+        self.gate = {'future': ccxt.gate(swap), 'spot': ccxt.gate(spot)}
         self.okx  = {'future': ccxt.okx(swap),    'spot': ccxt.okx(spot)}
 
     async def close_clients(self):
@@ -344,7 +344,7 @@ class CompleteSentinelEngine:
         avg  = np.mean(v[-21:-1]) if len(v) >= 21 else np.mean(v[:-1])
         return v[-1], (v[-1]/avg if avg > 0 else 1.0)
 
-    # ── EMA ───────────────────────────────────────────────────
+    # ── EMA ────────────────===================================
     def calc_ema(self, c: np.ndarray, period: int) -> float:
         c = np.asarray(c, dtype=float)
         if len(c) < period: return float(c[-1])
@@ -505,7 +505,7 @@ class CompleteSentinelEngine:
         elif net >= 3: return score, "BUY 📈",           "🟢"
         elif net <= -7: return score, "STRONG SELL 📉",  "🔴"
         elif net <= -3: return score, "SELL 🔻",         "🔴"
-        else:           return score, "NEUTRAL ⚪",      "⚪"
+        else:           return score, "NEUTRAL ⚪",       "⚪"
 
     # ── Compact number formatter ──────────────────────────────
     def fmt(self, v: float, signed=False) -> str:
@@ -564,9 +564,9 @@ class CompleteSentinelEngine:
 
         lines = [
             D2,
-            f"  📊 {symbol}",
-            f"  💵 Price  : ${price:,.6f}",
-            f"  🏛  Source : {source}",
+            f"   📊 {symbol}",
+            f"   💵 Price  : ${price:,.6f}",
+            f"   🏛  Source : {source}",
             D2,
             f"{'TF':<5}│{'RSI(14)':<12}│{'MFI(14)':<12}│{'OBV':<11}│VOL",
             D,
@@ -629,17 +629,17 @@ class CompleteSentinelEngine:
 
             lines += [
                 "",
-                f"  📐 EMA (1h basis)",
-                f"  {ema_line}",
+                f"   📐 EMA (1h basis)",
+                f"   {ema_line}",
                 D,
-                f"  📈 TREND      : {trend_icon} {trend_lbl}",
-                f"  🏗  STRUCTURE  : {struct_icon} {struct_lbl}",
-                f"  🔀 DIVERGENCE : {div_icon} {div_lbl}",
+                f"   📈 TREND      : {trend_icon} {trend_lbl}",
+                f"   🏗  STRUCTURE  : {struct_icon} {struct_lbl}",
+                f"   🔀 DIVERGENCE : {div_icon} {div_lbl}",
                 D,
-                f"  ⚡ SIGNAL  {score}/10  →  {sig_icon} {sig_lbl}",
+                f"   ⚡ SIGNAL  {score}/10  →  {sig_icon} {sig_lbl}",
             ]
         else:
-            lines.append("  ⚠️  Insufficient data")
+            lines.append("   ⚠️  Insufficient data")
 
         lines.append(D2)
         html = f"<pre>{esc(chr(10).join(lines))}</pre>"
