@@ -25,7 +25,7 @@ log = logging.getLogger("SENTINEL")
 # ================================================================
 # VERSION
 # ================================================================
-BOT_VERSION = "V22.1"
+BOT_VERSION = "V22.2"
 BOT_NAME    = f"SENTINEL MATRIX ENGINE {BOT_VERSION}"
 
 # ================================================================
@@ -142,28 +142,8 @@ async def lifespan(app: FastAPI):
     _http          = httpx.AsyncClient()
     engine_instance = CompleteSentinelEngine()
 
-    await setup_webhook()
-
     tg_task   = asyncio.create_task(tg_worker())
     loop_task = asyncio.create_task(engine_instance.engine_core_loop())
-
-    if ALLOWED_CHAT_ID:
-        coins    = engine_instance.tracked_symbols
-        boot_msg = (
-            f"🚀 <b>{esc(BOT_NAME)} ONLINE</b>\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"📊 Indicators : RSI · MFI · OBV · Volume\n"
-            f"📈 Analysis   : EMA20/50/200 · Trend · BOS/CHoCH\n"
-            f"              Divergence · Signal Score\n"
-            f"🔕 Cooldown   : Duplicate signals suppressed\n"
-            f"⏱  Timeframes : 1m · 5m · 15m · 1h · 4h\n"
-            f"🔄 Auto-Loop  : Every {LOOP_INTERVAL}s\n"
-            f"💾 DB         : Persistent (restart-safe)\n"
-            f"🪙 Coins      : {len(coins)} loaded\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"Use /help for commands."
-        )
-        send_telegram_msg(int(ALLOWED_CHAT_ID), boot_msg)
 
     yield
 
@@ -665,6 +645,28 @@ class CompleteSentinelEngine:
 
     # ── 2-minute auto loop ────────────────────────────────────
     async def engine_core_loop(self):
+        # 5-second delay to ensure absolute fast API port-binding readiness on Render
+        await asyncio.sleep(5)
+        await setup_webhook()
+        
+        if ALLOWED_CHAT_ID:
+            coins = self.tracked_symbols
+            boot_msg = (
+                f"🚀 <b>{esc(BOT_NAME)} ONLINE</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"📊 Indicators : RSI · MFI · OBV · Volume\n"
+                f"📈 Analysis   : EMA20/50/200 · Trend · BOS/CHoCH\n"
+                f"              Divergence · Signal Score\n"
+                f"🔕 Cooldown   : Duplicate signals suppressed\n"
+                f"⏱  Timeframes : 1m · 5m · 15m · 1h · 4h\n"
+                f"🔄 Auto-Loop  : Every {LOOP_INTERVAL}s\n"
+                f"💾 DB         : Persistent (restart-safe)\n"
+                f"🪙 Coins      : {len(coins)} loaded\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"Use /help for commands."
+            )
+            send_telegram_msg(int(ALLOWED_CHAT_ID), boot_msg)
+
         log.info(f"[ENGINE] {BOT_NAME} — auto-loop started")
         while True:
             if ALLOWED_CHAT_ID:
