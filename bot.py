@@ -25,7 +25,7 @@ log = logging.getLogger("SENTINEL")
 # ================================================================
 # VERSION
 # ================================================================
-BOT_VERSION = "V22.4-FIXED"
+BOT_VERSION = "V23.0-CONTROLLED"
 BOT_NAME    = f"SENTINEL MATRIX ENGINE {BOT_VERSION}"
 
 # ================================================================
@@ -38,7 +38,6 @@ try:
 except ImportError:
     log.info("[ENV] python-dotenv not installed — using system env vars only")
 
-# Helper function to clean and validate environment strings
 def clean_env_var(key: str) -> Optional[str]:
     val = os.environ.get(key, "").strip().strip("'").strip('"')
     if val in ["None", "none", "", "null", "False", "false"]:
@@ -48,12 +47,10 @@ def clean_env_var(key: str) -> Optional[str]:
 TELEGRAM_TOKEN = clean_env_var("TELEGRAM_TOKEN") or clean_env_var("API_KEY")
 RAW_CHAT_ID    = clean_env_var("CHAT_ID")
 
-# Advanced cleaning for Chat ID to support negative IDs (Groups/Channels)
 def parse_chat_id(raw_id: Optional[str]) -> Optional[int]:
     if not raw_id:
         return None
     try:
-        # Removes any accidentally left text or formatting but preserves minus sign
         cleaned = "".join([c for c in raw_id if c.isdigit() or c == '-'])
         return int(cleaned)
     except ValueError:
@@ -66,7 +63,10 @@ LOOP_INTERVAL = int(os.environ.get("LOOP_INTERVAL", "120").strip())
 DB_PATH       = os.path.join(os.path.dirname(os.path.abspath(__file__)), "coins.db")
 OHLCV_LIMIT   = 500
 
-# STRICT ENV VALIDATION AT STARTUP (No more 50% probability guesswork)
+# ENGINE RUNTIME STATE MATRIX
+# Starts as False until the user explicitly hits /start in Telegram
+is_engine_active = False
+
 log.info(f"[ENV MATRIX] TELEGRAM_TOKEN  = {'VALID ✅' if TELEGRAM_TOKEN else 'CRITICAL MISSING ❌'}")
 log.info(f"[ENV MATRIX] RAW CHAT_ID      = '{RAW_CHAT_ID}'")
 log.info(f"[ENV MATRIX] PARSED CHAT_ID   = {ALLOWED_CHAT_ID if ALLOWED_CHAT_ID else 'CRITICAL MISSING ❌'}")
@@ -143,23 +143,6 @@ def esc(text: str) -> str:
     return text.replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
 
 # ================================================================
-# SIGNAL COOLDOWN
-# ================================================================
-_last_signal: Dict[str, Tuple[int, str, float]] = {}
-
-def should_send_signal(symbol: str, score: int, sig_lbl: str) -> bool:
-    now  = datetime.now(timezone.utc).timestamp()
-    prev = _last_signal.get(symbol)
-    if prev is None:
-        _last_signal[symbol] = (score, sig_lbl, now)
-        return True
-    prev_score, prev_lbl, _ = prev
-    if sig_lbl != prev_lbl or abs(score - prev_score) >= 2:
-        _last_signal[symbol] = (score, sig_lbl, now)
-        return True
-    return False
-
-# ================================================================
 # FASTAPI LIFESPAN
 # ================================================================
 @asynccontextmanager
@@ -186,6 +169,7 @@ def health():
     return {
         "status"       : "ONLINE",
         "engine"       : BOT_NAME,
+        "engine_active": is_engine_active,
         "chat_id_set"  : ALLOWED_CHAT_ID is not None,
         "coins_loaded" : len(db_load()),
         "timestamp"    : datetime.now(timezone.utc).isoformat()
@@ -196,7 +180,7 @@ def health():
 # ================================================================
 @app.post("/tg-webhook")
 async def tg_webhook(request: Request):
-    global engine_instance
+    global engine_instance, is_engine_active
     try:
         data = await request.json()
         if "message" not in data:
@@ -215,28 +199,61 @@ async def tg_webhook(request: Request):
         parts   = text.split()
         command = parts[0].lower()
         
-        if command in ("/start","/help"):
+        if command == "/start":
+            if not is_engine_active:
+                is_engine_active = True
+                log.info("[CONTROL] Engine activated via Telegram command.")
+                coins = engine_instance.tracked_symbols.copy()
+                send_telegram_msg(chat_id, (
+                    f"🚀 <b>{esc(BOT_NAME)} CORES ACTIVATED</b>\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"🔄 Auto-scan loop is now active.\n"
+                    f"⏱ Interval: Every {LOOP_INTERVAL}s\n"
+                    f"🔕 Cooldown: DISABLED (Raw Feed Mode)\n"
+                    f"🪙 Tracked Coins: {len(coins)} loaded\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"Use <code>/stop</code> to put the bot to sleep."
+                ))
+            else:
+                send_telegram_msg(chat_id, "⚠️ Engine is already running and monitoring markets.")
+                
+        elif command == "/stop":
+            if is_engine_active:
+                is_engine_active = False
+                log.info("[CONTROL] Engine paused/put to sleep via Telegram command.")
+                send_telegram_msg(chat_id, (
+                    f"😴 <b>{esc(BOT_NAME)} SLEEP MODE</b>\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"🛑 Auto-scan loops have been paused.\n"
+                    f"💤 Bot will sleep until you send <code>/start</code> again."
+                ))
+            else:
+                send_telegram_msg(chat_id, "💤 Bot is already sleeping.")
+
+        elif command == "/help":
             send_telegram_msg(chat_id, (
-                f"📊 <b>{esc(BOT_NAME)}</b>\n\n"
+                f"📊 <b>{esc(BOT_NAME)} Manual</b>\n\n"
                 "Commands:\n"
-                "🔹 <code>/add SOL</code> — Add coin\n"
-                "🔹 <code>/remove SOL</code> — Remove coin\n"
+                "🚀 <code>/start</code> — Activate core loop & alerts\n"
+                "🛑 <code>/stop</code> — Pause loop and let bot sleep\n"
+                "🔹 <code>/add SOL</code> — Add coin to checklist\n"
+                "🔹 <code>/remove SOL</code> — Remove coin from checklist\n"
                 "🔹 <code>/list</code> — Show tracked coins\n"
-                "🔹 <code>/scan</code> — Instant full scan\n"
-                "🔹 <code>/status</code> — Bot status + env check\n\n"
-                "<i>Tip: Just coin name — /USDT auto-added</i>"
+                "🔍 <code>/scan</code> — Force instant scan right now\n"
+                "🔹 <code>/status</code> — Check system core status"
             ))
+            
         elif command == "/status":
             send_telegram_msg(chat_id, (
-                f"🔧 <b>Bot Status</b>\n\n"
+                f"🔧 <b>Bot Status Control Panel</b>\n\n"
                 f"Version    : {BOT_NAME}\n"
-                f"CHAT_ID    : {'✅ Set' if ALLOWED_CHAT_ID else '❌ NOT SET'}\n"
-                f"TG Token   : {'✅ Set' if TELEGRAM_TOKEN else '❌ NOT SET'}\n"
-                f"Loop       : Every {LOOP_INTERVAL}s\n"
-                f"DB Path    : {DB_PATH}\n"
+                f"Core Loop  : {'🟢 RUNNING' if is_engine_active else '🔴 SLEEPING / PAUSED'}\n"
+                f"LOOP TIME  : Every {LOOP_INTERVAL}s\n"
+                f"COOLDOWN   : ❌ REMOVED (Raw Feed)\n"
                 f"Coins      : {len(db_load())} tracked\n"
                 f"Time (UTC) : {datetime.now(timezone.utc).strftime('%H:%M:%S')}"
             ))
+            
         elif command == "/add":
             if len(parts) < 2:
                 send_telegram_msg(chat_id, "⚠️ Usage: <code>/add SOL</code>")
@@ -245,6 +262,7 @@ async def tg_webhook(request: Request):
                 coin = raw if "/" in raw else f"{raw}/USDT"
                 engine_instance.add_coin(coin)
                 send_telegram_msg(chat_id, f"✅ Added: <b>{esc(coin)}</b>")
+                
         elif command == "/remove":
             if len(parts) < 2:
                 send_telegram_msg(chat_id, "⚠️ Usage: <code>/remove SOL</code>")
@@ -253,14 +271,17 @@ async def tg_webhook(request: Request):
                 coin = raw if "/" in raw else f"{raw}/USDT"
                 engine_instance.remove_coin(coin)
                 send_telegram_msg(chat_id, f"🗑️ Removed: <b>{esc(coin)}</b>")
+                
         elif command == "/list":
             with engine_instance.symbol_lock:
                 coins = engine_instance.tracked_symbols.copy()
             lines = "\n".join([f"  {i+1}. {c}" for i,c in enumerate(coins)])
             send_telegram_msg(chat_id, f"📋 <b>Tracked ({len(coins)}):</b>\n\n{lines or 'Empty'}")
+            
         elif command == "/scan":
             send_telegram_msg(chat_id, "🔍 Scanning all coins… please wait.")
-            asyncio.create_task(engine_instance.run_scan(chat_id, cooldown=False))
+            asyncio.create_task(engine_instance.run_scan(chat_id))
+            
     except Exception as e:
         log.error(f"[WEBHOOK ERROR] {e}")
     return {"status":"ok"}
@@ -296,7 +317,7 @@ class CompleteSentinelEngine:
             if s in self.tracked_symbols:
                 self.tracked_symbols.remove(s); db_remove(s)
 
-    # ── Technical Indicators Block (RSI, MFI, OBV, EMA, Trends) ──
+    # ── Technical Indicators Block ──
     def calc_rsi(self, closes: np.ndarray) -> float:
         c = np.asarray(closes, dtype=float)
         if len(c) < 15: return 50.0
@@ -575,53 +596,41 @@ class CompleteSentinelEngine:
         html = f"<pre>{esc(chr(10).join(lines))}</pre>"
         return html, score, sig_lbl
 
-    async def run_scan(self, chat_id: int, cooldown: bool = True):
+    # COOLDOWN CRITICAL REMOVAL: Process symbols and send direct updates every single time
+    async def run_scan(self, chat_id: int):
         with self.symbol_lock:
             symbols = self.tracked_symbols.copy()
         async def process_and_send(sym):
             result = await self.process_symbol(sym)
             if not result: return
-            html, score, sig_lbl = result
-            if cooldown and not should_send_signal(sym, score, sig_lbl):
-                log.info(f"[COOLDOWN] {sym} — same signal, skipped")
-                return
+            html, _, _ = result
+            # Direct transmission block — Cooldown skip filter completely wiped out
             send_telegram_msg(chat_id, html)
         await asyncio.gather(*[process_and_send(s) for s in symbols])
 
-    # ── Fixed Loop Block ──
+    # Controlled Matrix Auto Loop
     async def engine_core_loop(self):
         await asyncio.sleep(5)
         await setup_webhook()
         
-        if ALLOWED_CHAT_ID:
-            coins = self.tracked_symbols
-            boot_msg = (
-                f"🚀 <b>{esc(BOT_NAME)} ONLINE</b>\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"📊 Indicators : RSI · MFI · OBV · Volume\n"
-                f"📈 Analysis   : EMA20/50/200 · Trend\n"
-                f"              BOS/CHoCH · Divergence · Score\n"
-                f"🔕 Cooldown   : Duplicate signals suppressed\n"
-                f"⏱  Timeframes : 1m · 5m · 15m · 1h · 4h\n"
-                f"🔄 Auto-Loop  : Every {LOOP_INTERVAL}s\n"
-                f"💾 DB         : Persistent (restart-safe)\n"
-                f"🪙 Coins      : {len(coins)} loaded\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"Use /help for commands."
-            )
-            send_telegram_msg(ALLOWED_CHAT_ID, boot_msg)
-        else:
-            log.error("[ENGINE] ❌ CHAT_ID is missing or invalid. Auto-loop cannot start.")
+        if not ALLOWED_CHAT_ID:
+            log.error("[ENGINE] ❌ CHAT_ID is missing or invalid. Engine loop crashed on initial state validation.")
             return
 
+        log.info(f"[ENGINE] {BOT_NAME} loaded. Awaiting active trigger command /start via Telegram.")
+
         while True:
-            ts = datetime.now(timezone.utc).strftime('%H:%M:%S UTC')
-            log.info(f"[LOOP] Scan @ {ts}")
-            try:
-                await self.run_scan(ALLOWED_CHAT_ID, cooldown=True)
-            except Exception as e:
-                log.error(f"[LOOP ERROR] {e}")
-            log.info(f"[LOOP] Next scan in {LOOP_INTERVAL}s")
+            if is_engine_active:
+                ts = datetime.now(timezone.utc).strftime('%H:%M:%S UTC')
+                log.info(f"[LOOP CORE] Active Scan Triggered @ {ts}")
+                try:
+                    await self.run_scan(ALLOWED_CHAT_ID)
+                except Exception as e:
+                    log.error(f"[LOOP ERROR] {e}")
+            else:
+                # Idle state matrix — prevents resource usage while bot is in sleep mode
+                log.debug("[LOOP CORE] Engine is currently in sleep mode. Skipping cycle iteration.")
+                
             await asyncio.sleep(LOOP_INTERVAL)
 
 # ================================================================
