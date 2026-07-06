@@ -198,7 +198,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 engine_instance = None
 
-@app.get("/")
+@app.api_route("/", methods=["GET", "HEAD"])
 def health():
     return {
         "status"       : "ONLINE",
