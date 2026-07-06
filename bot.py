@@ -25,7 +25,7 @@ log = logging.getLogger("SENTINEL")
 # ================================================================
 # VERSION
 # ================================================================
-BOT_VERSION = "V24.0-STABLE"
+BOT_VERSION = "V24.1-STABLE"
 BOT_NAME    = f"SENTINEL MATRIX ENGINE {BOT_VERSION}"
 
 # ================================================================
@@ -426,45 +426,49 @@ class CompleteSentinelEngine:
         if neg == 0: return 100.0
         return round(100 - 100/(1 + pos/neg), 2)
 
-    # ── Liquidity Heatmap (order-book depth, bucketed by % distance) ──
+    # ── Major Liquidity Zones (simplified order-book read) ──
     def calc_liquidity_heatmap(self, bids: list, asks: list, price: float) -> List[str]:
         """
-        Builds a compact, phone-friendly liquidity heatmap from a live
-        order book snapshot. Buckets bid/ask depth into % bands away from
-        the current price so big buy/sell walls (support/resistance) are
-        visible at a glance, without the wide separator lines used
-        elsewhere in the report.
+        Simple, phone-friendly view of where the real liquidity is sitting.
+        Groups raw order-book levels into small price buckets, ranks the
+        buckets by total value, and just reports the top 2 zones above
+        price (resistance) and top 2 below price (support) — no bars,
+        no bands, just the price levels that matter.
         """
-        bands = [0.5, 1.0, 2.0, 5.0]  # % distance thresholds
+        bucket_size = max(price * 0.001, 1e-9)  # ~0.1% of price per bucket
 
-        def bucket(levels):
-            sums = [0.0] * len(bands)
+        def cluster(levels):
+            buckets: Dict[float, float] = {}
             for lvl_price, amount in levels:
                 if lvl_price <= 0 or amount <= 0:
                     continue
-                pct = abs(lvl_price / price - 1) * 100
-                for i, b in enumerate(bands):
-                    lower = bands[i-1] if i > 0 else 0.0
-                    if lower < pct <= b:
-                        sums[i] += lvl_price * amount  # quote-value depth
-                        break
-            return sums
+                value  = lvl_price * amount
+                bucket = round(lvl_price / bucket_size) * bucket_size
+                buckets[bucket] = buckets.get(bucket, 0.0) + value
+            top = sorted(buckets.items(), key=lambda x: -x[1])[:2]
+            return sorted(top, key=lambda x: x[0])
 
-        ask_sums = bucket(asks)  # resistance, above price
-        bid_sums = bucket(bids)  # support, below price
-        max_val  = max(ask_sums + bid_sums) or 1.0
-        bar_w    = 8
+        ask_zones = cluster(asks)  # resistance, above price
+        bid_zones = cluster(bids)  # support, below price
+        ask_zones.sort(key=lambda x: x[0])           # nearest resistance first
+        bid_zones.sort(key=lambda x: x[0], reverse=True)  # nearest support first
 
-        def bar(val):
-            filled = round((val / max_val) * bar_w)
-            return "█" * filled + "░" * (bar_w - filled)
+        lines = ["🎯 <b>Major Liquidity Zones</b>"]
+        if ask_zones:
+            for p, v in ask_zones:
+                dist = (p/price - 1) * 100
+                lines.append(f"🔺 ${p:,.4f}  (+{dist:.2f}%)  {self.fmt(v)}")
+        else:
+            lines.append("🔺 No major resistance data")
 
-        lines = ["   🌡 LIQUIDITY MAP"]
-        for i in reversed(range(len(bands))):
-            lines.append(f"   +{bands[i]:>4.1f}% {bar(ask_sums[i])} {self.fmt(ask_sums[i])}")
-        lines.append(f"   ── ${price:,.4f} ──")
-        for i in range(len(bands)):
-            lines.append(f"   -{bands[i]:>4.1f}% {bar(bid_sums[i])} {self.fmt(bid_sums[i])}")
+        lines.append(f"💵 ${price:,.4f} ← current price")
+
+        if bid_zones:
+            for p, v in bid_zones:
+                dist = (p/price - 1) * 100
+                lines.append(f"🔻 ${p:,.4f}  ({dist:.2f}%)  {self.fmt(v)}")
+        else:
+            lines.append("🔻 No major support data")
         return lines
 
     def calc_obv(self, c: np.ndarray, v: np.ndarray) -> Tuple[float, str]:
@@ -634,15 +638,18 @@ class CompleteSentinelEngine:
         price, source, client, mkt = await self.fetch_exchange_data(symbol)
         if not price or not client:
             return None
-        D  = "─" * 54
-        D2 = "═" * 54
+
+        # Light emoji separators instead of the old solid block lines
+        D2 = "🔶━━━━━━━━━━━━━━━━━━━🔶"
+        D  = "▫️▫️▫️▫️▫️▫️▫️▫️▫️▫️▫️▫️▫️▫️"
+
         lines = [
             D2,
             f"   📊 {symbol}",
             f"   💵 Price  : ${price:,.6f}",
             f"   🏛  Source : {source}",
             D2,
-            f"{'TF':<5}│{'RSI(14)':<12}│{'MFI(14)':<12}│{'OBV':<11}│VOL",
+            f"{'TF':<5}│{'RSI(14)':<12}│{'MFI(14)':<12}│OBV",
             D,
         ]
         tf_store: Dict = {}
@@ -657,7 +664,7 @@ class CompleteSentinelEngine:
         results = await asyncio.gather(*[fetch_tf(tf) for tf in self.TIMEFRAMES])
         for tf, ohlcv in results:
             if not ohlcv or len(ohlcv) < 20:
-                lines.append(f"{tf:<5}│{'--':^12}│{'--':^12}│{'--':^11}│--")
+                lines.append(f"{tf:<5}│{'--':^12}│{'--':^12}│--")
                 continue
             h=np.array([float(x[2]) for x in ohlcv])
             l=np.array([float(x[3]) for x in ohlcv])
@@ -672,9 +679,20 @@ class CompleteSentinelEngine:
             tf_store[tf] = dict(h=h,l=l,c=c,v=v,rsi=rsi,mfi=mfi,obv=obv,obv_dir=obv_dir,vol=vol,ratio=ratio)
             lines.append(
                 f"{tf:<5}│{self.rsi_lbl(rsi):<12}│{self.mfi_lbl(mfi):<12}"
-                f"│{self.fmt(obv,True)+obv_dir:<11}│{self.vol_lbl(vol,ratio)}"
+                f"│{self.fmt(obv,True)+obv_dir}"
             )
         lines.append(D)
+
+        # ── Volume moved below the main table, its own compact block ──
+        lines.append("   📊 VOLUME")
+        for tf in self.TIMEFRAMES:
+            if tf in tf_store:
+                d = tf_store[tf]
+                lines.append(f"   {tf:<5}: {self.vol_lbl(d['vol'], d['ratio'])}")
+            else:
+                lines.append(f"   {tf:<5}: --")
+        lines.append(D)
+
         pri = next((tf_store[t] for t in ['1h','15m','5m','1m'] if t in tf_store), None)
         score=5; sig_lbl="NEUTRAL ⚪"; sig_icon="⚪"
         if pri:
@@ -688,7 +706,6 @@ class CompleteSentinelEngine:
                 struct_icon, pri['obv_dir'], pri['ratio']
             )
             lines += [
-                "",
                 f"   📐 EMA (1h basis)",
                 f"   {ema_line}",
                 D,
@@ -701,19 +718,24 @@ class CompleteSentinelEngine:
         else:
             lines.append("   ⚠️  Insufficient data")
 
-        # ── Liquidity Heatmap block (order-book snapshot) ──
+        html_body = esc(chr(10).join(lines))
+
+        # ── Liquidity zones block (order-book snapshot) — kept outside
+        # the <pre> block since it uses <b> tags for the header/price ──
+        liq_lines = []
         try:
             book = await client.fetch_order_book(mkt, limit=50)
             bids = book.get('bids') or []
             asks = book.get('asks') or []
             if bids or asks:
-                lines.append("")
-                lines += self.calc_liquidity_heatmap(bids, asks, price)
+                liq_lines = self.calc_liquidity_heatmap(bids, asks, price)
         except Exception as e:
-            log.debug(f"[HEATMAP] {symbol} order book fetch failed: {e}")
+            log.debug(f"[LIQ ZONES] {symbol} order book fetch failed: {e}")
 
-        lines.append(D2)
-        html = f"<pre>{esc(chr(10).join(lines))}</pre>"
+        html = f"<pre>{html_body}</pre>"
+        if liq_lines:
+            html += "\n" + "\n".join(liq_lines)
+        html += f"\n{D2}"
         return html, score, sig_lbl
 
     # FIX #1: run_scan now shields each symbol with try/except so a single
