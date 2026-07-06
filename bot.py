@@ -25,7 +25,7 @@ log = logging.getLogger("SENTINEL")
 # ================================================================
 # VERSION
 # ================================================================
-BOT_VERSION = "V23.0-CONTROLLED"
+BOT_VERSION = "V24.0-STABLE"
 BOT_NAME    = f"SENTINEL MATRIX ENGINE {BOT_VERSION}"
 
 # ================================================================
@@ -63,14 +63,32 @@ LOOP_INTERVAL = int(os.environ.get("LOOP_INTERVAL", "120").strip())
 DB_PATH       = os.path.join(os.path.dirname(os.path.abspath(__file__)), "coins.db")
 OHLCV_LIMIT   = 500
 
+# FIX #3: Render (and most cloud hosts) assign a dynamic $PORT for health
+# checks. Hardcoding a port causes the platform's health check to fail,
+# which leads to periodic restarts/kills. We read $PORT with a safe fallback.
+PORT = int(os.environ.get("PORT", "10000"))
+
+# FIX #4: cap concurrent exchange calls so we don't get rate-limited (429)
+# when the tracked coin list is large. Also reduces odds of IP bans.
+MAX_CONCURRENT_SCANS = int(os.environ.get("MAX_CONCURRENT_SCANS", "5"))
+
 # ENGINE RUNTIME STATE MATRIX
-# Starts as False until the user explicitly hits /start in Telegram
-is_engine_active = False
+# FIX #5: on a fresh process boot, resume whatever state was last saved
+# (so a Render restart/spin-down doesn't silently leave the bot asleep
+# until someone notices and sends /start again). db_init() runs in the
+# lifespan handler before this is read, so the table always exists by then;
+# we still guard here in case this module is imported before lifespan runs.
+try:
+    db_init()
+    is_engine_active = db_load_engine_active()
+except Exception:
+    is_engine_active = False
 
 log.info(f"[ENV MATRIX] TELEGRAM_TOKEN  = {'VALID ✅' if TELEGRAM_TOKEN else 'CRITICAL MISSING ❌'}")
 log.info(f"[ENV MATRIX] RAW CHAT_ID      = '{RAW_CHAT_ID}'")
 log.info(f"[ENV MATRIX] PARSED CHAT_ID   = {ALLOWED_CHAT_ID if ALLOWED_CHAT_ID else 'CRITICAL MISSING ❌'}")
 log.info(f"[ENV MATRIX] RENDER_URL       = {RENDER_URL}")
+log.info(f"[ENV MATRIX] PORT             = {PORT}")
 
 if not TELEGRAM_TOKEN or not ALLOWED_CHAT_ID:
     log.error("[CRITICAL SHUTDOWN] Required environment variables are missing! Fix Render Dashboard.")
@@ -81,6 +99,11 @@ if not TELEGRAM_TOKEN or not ALLOWED_CHAT_ID:
 def db_init():
     con = sqlite3.connect(DB_PATH, timeout=20)
     con.execute("CREATE TABLE IF NOT EXISTS coins (symbol TEXT PRIMARY KEY)")
+    # FIX #5: persist engine on/off state so that if the process gets
+    # restarted (Render spin-down, redeploy, OOM kill, etc.) it can
+    # automatically resume scanning without waiting for a manual /start.
+    con.execute("CREATE TABLE IF NOT EXISTS engine_state (key TEXT PRIMARY KEY, value TEXT)")
+    con.execute("INSERT OR IGNORE INTO engine_state VALUES ('is_active', '0')")
     defaults = ["BTC/USDT","ETH/USDT","SOL/USDT","BB/USDT","LAB/USDT","BEAT/USDT"]
     for s in defaults:
         con.execute("INSERT OR IGNORE INTO coins VALUES (?)", (s,))
@@ -100,6 +123,17 @@ def db_add(symbol: str):
 def db_remove(symbol: str):
     con = sqlite3.connect(DB_PATH, timeout=20)
     con.execute("DELETE FROM coins WHERE symbol=?", (symbol,))
+    con.commit(); con.close()
+
+def db_load_engine_active() -> bool:
+    con = sqlite3.connect(DB_PATH, timeout=20)
+    row = con.execute("SELECT value FROM engine_state WHERE key='is_active'").fetchone()
+    con.close()
+    return bool(row and row[0] == "1")
+
+def db_save_engine_active(active: bool):
+    con = sqlite3.connect(DB_PATH, timeout=20)
+    con.execute("UPDATE engine_state SET value=? WHERE key='is_active'", ("1" if active else "0",))
     con.commit(); con.close()
 
 # ================================================================
@@ -152,10 +186,10 @@ async def lifespan(app: FastAPI):
     _tg_queue       = asyncio.Queue(maxsize=500)
     _http           = httpx.AsyncClient()
     engine_instance = CompleteSentinelEngine()
-    
+
     tg_task   = asyncio.create_task(tg_worker())
     loop_task = asyncio.create_task(engine_instance.engine_core_loop())
-    
+
     yield
     loop_task.cancel(); tg_task.cancel()
     await engine_instance.close_clients()
@@ -171,7 +205,7 @@ def health():
         "engine"       : BOT_NAME,
         "engine_active": is_engine_active,
         "chat_id_set"  : ALLOWED_CHAT_ID is not None,
-        "coins_loaded" : len(db_load()),
+        "coins_loaded" : len(engine_instance.tracked_symbols) if engine_instance else 0,
         "timestamp"    : datetime.now(timezone.utc).isoformat()
     }
 
@@ -188,22 +222,24 @@ async def tg_webhook(request: Request):
         msg     = data["message"]
         chat_id = msg["chat"]["id"]
         text    = msg.get("text","").strip()
-        
+
         if ALLOWED_CHAT_ID and int(chat_id) != ALLOWED_CHAT_ID:
             log.warning(f"[SECURITY] Blocked unauthorized chat {chat_id}")
             return {"status":"unauthorized"}
-            
+
         if not text.startswith("/"):
             return {"status":"not a command"}
-            
+
         parts   = text.split()
         command = parts[0].lower()
-        
+
         if command == "/start":
             if not is_engine_active:
                 is_engine_active = True
+                db_save_engine_active(True)
                 log.info("[CONTROL] Engine activated via Telegram command.")
-                coins = engine_instance.tracked_symbols.copy()
+                with engine_instance.symbol_lock:
+                    coins = engine_instance.tracked_symbols.copy()
                 send_telegram_msg(chat_id, (
                     f"🚀 <b>{esc(BOT_NAME)} CORES ACTIVATED</b>\n"
                     f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -216,10 +252,11 @@ async def tg_webhook(request: Request):
                 ))
             else:
                 send_telegram_msg(chat_id, "⚠️ Engine is already running and monitoring markets.")
-                
+
         elif command == "/stop":
             if is_engine_active:
                 is_engine_active = False
+                db_save_engine_active(False)
                 log.info("[CONTROL] Engine paused/put to sleep via Telegram command.")
                 send_telegram_msg(chat_id, (
                     f"😴 <b>{esc(BOT_NAME)} SLEEP MODE</b>\n"
@@ -242,18 +279,22 @@ async def tg_webhook(request: Request):
                 "🔍 <code>/scan</code> — Force instant scan right now\n"
                 "🔹 <code>/status</code> — Check system core status"
             ))
-            
+
         elif command == "/status":
+            # FIX #2: read from the in-memory list instead of hitting SQLite
+            # on every /status call.
+            with engine_instance.symbol_lock:
+                coin_count = len(engine_instance.tracked_symbols)
             send_telegram_msg(chat_id, (
                 f"🔧 <b>Bot Status Control Panel</b>\n\n"
                 f"Version    : {BOT_NAME}\n"
                 f"Core Loop  : {'🟢 RUNNING' if is_engine_active else '🔴 SLEEPING / PAUSED'}\n"
                 f"LOOP TIME  : Every {LOOP_INTERVAL}s\n"
                 f"COOLDOWN   : ❌ REMOVED (Raw Feed)\n"
-                f"Coins      : {len(db_load())} tracked\n"
+                f"Coins      : {coin_count} tracked\n"
                 f"Time (UTC) : {datetime.now(timezone.utc).strftime('%H:%M:%S')}"
             ))
-            
+
         elif command == "/add":
             if len(parts) < 2:
                 send_telegram_msg(chat_id, "⚠️ Usage: <code>/add SOL</code>")
@@ -262,7 +303,7 @@ async def tg_webhook(request: Request):
                 coin = raw if "/" in raw else f"{raw}/USDT"
                 engine_instance.add_coin(coin)
                 send_telegram_msg(chat_id, f"✅ Added: <b>{esc(coin)}</b>")
-                
+
         elif command == "/remove":
             if len(parts) < 2:
                 send_telegram_msg(chat_id, "⚠️ Usage: <code>/remove SOL</code>")
@@ -271,17 +312,17 @@ async def tg_webhook(request: Request):
                 coin = raw if "/" in raw else f"{raw}/USDT"
                 engine_instance.remove_coin(coin)
                 send_telegram_msg(chat_id, f"🗑️ Removed: <b>{esc(coin)}</b>")
-                
+
         elif command == "/list":
             with engine_instance.symbol_lock:
                 coins = engine_instance.tracked_symbols.copy()
             lines = "\n".join([f"  {i+1}. {c}" for i,c in enumerate(coins)])
             send_telegram_msg(chat_id, f"📋 <b>Tracked ({len(coins)}):</b>\n\n{lines or 'Empty'}")
-            
+
         elif command == "/scan":
             send_telegram_msg(chat_id, "🔍 Scanning all coins… please wait.")
             asyncio.create_task(engine_instance.run_scan(chat_id))
-            
+
     except Exception as e:
         log.error(f"[WEBHOOK ERROR] {e}")
     return {"status":"ok"}
@@ -291,7 +332,7 @@ async def tg_webhook(request: Request):
 # ================================================================
 class CompleteSentinelEngine:
     TIMEFRAMES = ['1m','5m','15m','1h','4h']
-    
+
     def __init__(self):
         self.symbol_lock     = threading.Lock()
         self.tracked_symbols = db_load()
@@ -299,6 +340,8 @@ class CompleteSentinelEngine:
         spot = {"options":{"defaultType":"spot"},"enableRateLimit":True}
         self.gate = {'future': ccxt.gate(swap), 'spot': ccxt.gate(spot)}
         self.okx  = {'future': ccxt.okx(swap),  'spot': ccxt.okx(spot)}
+        # FIX #4: bound concurrent exchange calls to avoid rate-limit storms
+        self.scan_semaphore = asyncio.Semaphore(MAX_CONCURRENT_SCANS)
 
     async def close_clients(self):
         for c in list(self.gate.values()) + list(self.okx.values()):
@@ -359,7 +402,48 @@ class CompleteSentinelEngine:
         if neg == 0: return 100.0
         return round(100 - 100/(1 + pos/neg), 2)
 
-    def calc_obv(self, c: np.ndarray, v: np.ndarray) -> Tuple[float, str]:
+    # ── Liquidity Heatmap (order-book depth, bucketed by % distance) ──
+    def calc_liquidity_heatmap(self, bids: list, asks: list, price: float) -> List[str]:
+        """
+        Builds a compact, phone-friendly liquidity heatmap from a live
+        order book snapshot. Buckets bid/ask depth into % bands away from
+        the current price so big buy/sell walls (support/resistance) are
+        visible at a glance, without the wide separator lines used
+        elsewhere in the report.
+        """
+        bands = [0.5, 1.0, 2.0, 5.0]  # % distance thresholds
+
+        def bucket(levels):
+            sums = [0.0] * len(bands)
+            for lvl_price, amount in levels:
+                if lvl_price <= 0 or amount <= 0:
+                    continue
+                pct = abs(lvl_price / price - 1) * 100
+                for i, b in enumerate(bands):
+                    lower = bands[i-1] if i > 0 else 0.0
+                    if lower < pct <= b:
+                        sums[i] += lvl_price * amount  # quote-value depth
+                        break
+            return sums
+
+        ask_sums = bucket(asks)  # resistance, above price
+        bid_sums = bucket(bids)  # support, below price
+        max_val  = max(ask_sums + bid_sums) or 1.0
+        bar_w    = 8
+
+        def bar(val):
+            filled = round((val / max_val) * bar_w)
+            return "█" * filled + "░" * (bar_w - filled)
+
+        lines = ["   🌡 LIQUIDITY MAP"]
+        for i in reversed(range(len(bands))):
+            lines.append(f"   +{bands[i]:>4.1f}% {bar(ask_sums[i])} {self.fmt(ask_sums[i])}")
+        lines.append(f"   ── ${price:,.4f} ──")
+        for i in range(len(bands)):
+            lines.append(f"   -{bands[i]:>4.1f}% {bar(bid_sums[i])} {self.fmt(bid_sums[i])}")
+        return lines
+
+
         c = np.asarray(c,dtype=float); v = np.asarray(v,dtype=float)
         if len(c) < 2: return 0.0, "⚪"
         obv = np.zeros(len(c))
@@ -410,7 +494,7 @@ class CompleteSentinelEngine:
         c = np.asarray(c, dtype=float)
         if len(c) < 40: return "No Data", "⚪"
         seg = c[-60:] if len(c) >= 60 else c
-        seg = seg[:-2]   
+        seg = seg[:-2]
         ph, pl = [], []
         for i in range(5, len(seg)-5):
             if seg[i] == np.max(seg[i-5:i+6]): ph.append((i, seg[i]))
@@ -555,12 +639,12 @@ class CompleteSentinelEngine:
             l=np.array([float(x[3]) for x in ohlcv])
             c=np.array([float(x[4]) for x in ohlcv])
             v=np.array([float(x[5]) for x in ohlcv])
-            
+
             rsi          = self.calc_rsi(c)
             mfi          = self.calc_mfi(h,l,c,v)
             obv, obv_dir = self.calc_obv(c,v)
             vol, ratio   = self.calc_vol_ratio(v)
-            
+
             tf_store[tf] = dict(h=h,l=l,c=c,v=v,rsi=rsi,mfi=mfi,obv=obv,obv_dir=obv_dir,vol=vol,ratio=ratio)
             lines.append(
                 f"{tf:<5}│{self.rsi_lbl(rsi):<12}│{self.mfi_lbl(mfi):<12}"
@@ -592,32 +676,63 @@ class CompleteSentinelEngine:
             ]
         else:
             lines.append("   ⚠️  Insufficient data")
+
+        # ── Liquidity Heatmap block (order-book snapshot) ──
+        try:
+            book = await client.fetch_order_book(mkt, limit=100)
+            bids = book.get('bids') or []
+            asks = book.get('asks') or []
+            if bids or asks:
+                lines.append("")
+                lines += self.calc_liquidity_heatmap(bids, asks, price)
+        except Exception as e:
+            log.debug(f"[HEATMAP] {symbol} order book fetch failed: {e}")
+
         lines.append(D2)
         html = f"<pre>{esc(chr(10).join(lines))}</pre>"
         return html, score, sig_lbl
 
-    # COOLDOWN CRITICAL REMOVAL: Process symbols and send direct updates every single time
+    # FIX #1: run_scan now shields each symbol with try/except so a single
+    # network error / rate-limit / exchange hiccup can't silently swallow
+    # results for the rest of the batch. FIX #4: semaphore caps concurrency.
     async def run_scan(self, chat_id: int):
         with self.symbol_lock:
             symbols = self.tracked_symbols.copy()
+
         async def process_and_send(sym):
-            result = await self.process_symbol(sym)
-            if not result: return
-            html, _, _ = result
-            # Direct transmission block — Cooldown skip filter completely wiped out
-            send_telegram_msg(chat_id, html)
+            async with self.scan_semaphore:
+                try:
+                    result = await self.process_symbol(sym)
+                    if not result:
+                        return
+                    html, _, _ = result
+                    # Direct transmission block — Cooldown skip filter completely wiped out
+                    send_telegram_msg(chat_id, html)
+                except Exception as e:
+                    log.error(f"[SCAN ERROR] Failed to process/send {sym}: {e}")
+
         await asyncio.gather(*[process_and_send(s) for s in symbols])
 
     # Controlled Matrix Auto Loop
     async def engine_core_loop(self):
         await asyncio.sleep(5)
         await setup_webhook()
-        
+
         if not ALLOWED_CHAT_ID:
             log.error("[ENGINE] ❌ CHAT_ID is missing or invalid. Engine loop crashed on initial state validation.")
             return
 
         log.info(f"[ENGINE] {BOT_NAME} loaded. Awaiting active trigger command /start via Telegram.")
+
+        # FIX #5: make process restarts visible in Telegram (not just Render
+        # logs), and auto-resume scanning if it was active before the restart.
+        boot_note = (
+            f"♻️ <b>{esc(BOT_NAME)} process restarted</b>\n"
+            f"State resumed: {'🟢 RUNNING' if is_engine_active else '🔴 SLEEPING'}\n"
+            f"If this is unexpected, check Render logs — the container likely "
+            f"restarted (spin-down, redeploy, or crash)."
+        )
+        send_telegram_msg(ALLOWED_CHAT_ID, boot_note)
 
         while True:
             if is_engine_active:
@@ -630,11 +745,12 @@ class CompleteSentinelEngine:
             else:
                 # Idle state matrix — prevents resource usage while bot is in sleep mode
                 log.debug("[LOOP CORE] Engine is currently in sleep mode. Skipping cycle iteration.")
-                
+
             await asyncio.sleep(LOOP_INTERVAL)
 
 # ================================================================
 # ENTRY POINT
 # ================================================================
 if __name__ == "__main__":
-    uvicorn.run("bot:app", host="0.0.0.0", port=10000, log_level="warning", reload=False)
+    # FIX #3: use the platform-assigned $PORT (falls back to 10000 locally)
+    uvicorn.run("bot:app", host="0.0.0.0", port=PORT, log_level="warning", reload=False)
