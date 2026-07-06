@@ -125,6 +125,11 @@ def db_remove(symbol: str):
     con.execute("DELETE FROM coins WHERE symbol=?", (symbol,))
     con.commit(); con.close()
 
+def db_clear_all():
+    con = sqlite3.connect(DB_PATH, timeout=20)
+    con.execute("DELETE FROM coins")
+    con.commit(); con.close()
+
 def db_load_engine_active() -> bool:
     con = sqlite3.connect(DB_PATH, timeout=20)
     row = con.execute("SELECT value FROM engine_state WHERE key='is_active'").fetchone()
@@ -275,6 +280,7 @@ async def tg_webhook(request: Request):
                 "🛑 <code>/stop</code> — Pause loop and let bot sleep\n"
                 "🔹 <code>/add SOL</code> — Add coin to checklist\n"
                 "🔹 <code>/remove SOL</code> — Remove coin from checklist\n"
+                "🔹 <code>/del</code> — Clear ALL tracked coins at once\n"
                 "🔹 <code>/list</code> — Show tracked coins\n"
                 "🔍 <code>/scan</code> — Force instant scan right now\n"
                 "🔹 <code>/status</code> — Check system core status"
@@ -313,6 +319,14 @@ async def tg_webhook(request: Request):
                 engine_instance.remove_coin(coin)
                 send_telegram_msg(chat_id, f"🗑️ Removed: <b>{esc(coin)}</b>")
 
+        elif command == "/del":
+            removed = engine_instance.clear_coins()
+            send_telegram_msg(chat_id, (
+                f"🧹 <b>All coins cleared</b>\n"
+                f"Removed {removed} tracked coin(s). List is now empty.\n"
+                f"Use <code>/add SOL</code> to start adding new ones."
+            ))
+
         elif command == "/list":
             with engine_instance.symbol_lock:
                 coins = engine_instance.tracked_symbols.copy()
@@ -336,8 +350,11 @@ class CompleteSentinelEngine:
     def __init__(self):
         self.symbol_lock     = threading.Lock()
         self.tracked_symbols = db_load()
-        swap = {"options":{"defaultType":"swap"},"enableRateLimit":True}
-        spot = {"options":{"defaultType":"spot"},"enableRateLimit":True}
+        # FIX #6: explicit timeout (ms). Without this, a stalled network call
+        # to an exchange can hang indefinitely and freeze the whole scan,
+        # since it never raises and never frees up its semaphore slot.
+        swap = {"options":{"defaultType":"swap"},"enableRateLimit":True,"timeout":15000}
+        spot = {"options":{"defaultType":"spot"},"enableRateLimit":True,"timeout":15000}
         self.gate = {'future': ccxt.gate(swap), 'spot': ccxt.gate(spot)}
         self.okx  = {'future': ccxt.okx(swap),  'spot': ccxt.okx(spot)}
         # FIX #4: bound concurrent exchange calls to avoid rate-limit storms
@@ -359,6 +376,13 @@ class CompleteSentinelEngine:
         with self.symbol_lock:
             if s in self.tracked_symbols:
                 self.tracked_symbols.remove(s); db_remove(s)
+
+    def clear_coins(self) -> int:
+        with self.symbol_lock:
+            count = len(self.tracked_symbols)
+            self.tracked_symbols.clear()
+            db_clear_all()
+        return count
 
     # ── Technical Indicators Block ──
     def calc_rsi(self, closes: np.ndarray) -> float:
@@ -443,7 +467,7 @@ class CompleteSentinelEngine:
             lines.append(f"   -{bands[i]:>4.1f}% {bar(bid_sums[i])} {self.fmt(bid_sums[i])}")
         return lines
 
-
+    def calc_obv(self, c: np.ndarray, v: np.ndarray) -> Tuple[float, str]:
         c = np.asarray(c,dtype=float); v = np.asarray(v,dtype=float)
         if len(c) < 2: return 0.0, "⚪"
         obv = np.zeros(len(c))
@@ -679,7 +703,7 @@ class CompleteSentinelEngine:
 
         # ── Liquidity Heatmap block (order-book snapshot) ──
         try:
-            book = await client.fetch_order_book(mkt, limit=100)
+            book = await client.fetch_order_book(mkt, limit=50)
             bids = book.get('bids') or []
             asks = book.get('asks') or []
             if bids or asks:
@@ -699,15 +723,22 @@ class CompleteSentinelEngine:
         with self.symbol_lock:
             symbols = self.tracked_symbols.copy()
 
+        SYMBOL_TIMEOUT = 40  # seconds — hard ceiling per coin, no matter what stalls
+
         async def process_and_send(sym):
             async with self.scan_semaphore:
+                log.info(f"[SCAN] {sym} → starting")
                 try:
-                    result = await self.process_symbol(sym)
+                    result = await asyncio.wait_for(self.process_symbol(sym), timeout=SYMBOL_TIMEOUT)
                     if not result:
+                        log.info(f"[SCAN] {sym} → no data, skipped")
                         return
                     html, _, _ = result
                     # Direct transmission block — Cooldown skip filter completely wiped out
                     send_telegram_msg(chat_id, html)
+                    log.info(f"[SCAN] {sym} → sent")
+                except asyncio.TimeoutError:
+                    log.error(f"[SCAN TIMEOUT] {sym} exceeded {SYMBOL_TIMEOUT}s — skipped, moving on")
                 except Exception as e:
                     log.error(f"[SCAN ERROR] Failed to process/send {sym}: {e}")
 
