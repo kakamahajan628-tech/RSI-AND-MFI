@@ -444,14 +444,15 @@ class CompleteSentinelEngine:
         return round(100 - 100/(1 + pos/neg), 2)
 
     # ── Major Liquidity Zones (simplified order-book read) ──
-    def calc_liquidity_heatmap(self, bids: list, asks: list, price: float) -> List[str]:
+    def calc_liquidity_heatmap(self, bids: list, asks: list, price: float, grab_pct: float = 10.0) -> List[str]:
         """
-        Free, Coinglass-style order-book liquidity heatmap. Groups raw
-        order-book levels into small price buckets, ranks the buckets by
-        total value, and reports the top 3 zones above price (resistance)
-        and top 3 below price (support) with a block-bar showing relative
-        intensity — same idea as Coinglass's heatmap, built entirely from
-        free public order-book data (no paid liquidation-data feed).
+        Free, Coinglass-style order-book liquidity heatmap — but filtered
+        down to only the EXTREME clusters (statistical outliers vs the
+        rest of the book), not every minor level. Also flags whether each
+        cluster sits within `grab_pct`% of current price (i.e. a move
+        that size would already have swept/grabbed that liquidity), and
+        gives a total $ figure for how much liquidity sits inside that
+        band on each side.
         """
         bucket_size = max(price * 0.001, 1e-9)  # ~0.1% of price per bucket
 
@@ -463,13 +464,28 @@ class CompleteSentinelEngine:
                 value  = lvl_price * amount
                 bucket = round(lvl_price / bucket_size) * bucket_size
                 buckets[bucket] = buckets.get(bucket, 0.0) + value
-            top = sorted(buckets.items(), key=lambda x: -x[1])[:3]
-            return sorted(top, key=lambda x: x[0])
+            return buckets
 
-        ask_zones = cluster(asks)  # resistance, above price
-        bid_zones = cluster(bids)  # support, below price
-        ask_zones.sort(key=lambda x: x[0])           # nearest resistance first
-        bid_zones.sort(key=lambda x: x[0], reverse=True)  # nearest support first
+        ask_buckets = cluster(asks)  # resistance, above price
+        bid_buckets = cluster(bids)  # support, below price
+
+        def extreme_zones(buckets: Dict[float, float]):
+            if not buckets:
+                return []
+            vals = np.array(list(buckets.values()), dtype=float)
+            mean = float(np.mean(vals)); std = float(np.std(vals))
+            threshold = mean + std if std > 0 else mean
+            zones = [(p, v) for p, v in buckets.items() if v >= threshold]
+            if not zones:
+                # always surface the single biggest cluster even if nothing
+                # is a clean statistical outlier
+                zones = [max(buckets.items(), key=lambda x: x[1])]
+            return sorted(zones, key=lambda x: -x[1])[:4]  # cap clutter
+
+        ask_zones = extreme_zones(ask_buckets)
+        bid_zones = extreme_zones(bid_buckets)
+        ask_zones.sort(key=lambda x: x[0])                 # nearest resistance first
+        bid_zones.sort(key=lambda x: x[0], reverse=True)   # nearest support first
 
         max_val = max([v for _, v in ask_zones + bid_zones] + [1.0])
 
@@ -477,25 +493,50 @@ class CompleteSentinelEngine:
             blocks = int(round((v / max_val) * 10)) if max_val > 0 else 0
             return "█" * max(1, min(10, blocks))
 
+        def grab_note(dist_pct: float) -> str:
+            return (f"⚠️ within {grab_pct:.0f}% — grab risk"
+                    if abs(dist_pct) <= grab_pct else
+                    f"🛡️ {abs(dist_pct):.1f}% away")
+
+        # total $ sitting inside the ±grab_pct% band on each side — this is
+        # "how much liquidity gets swept if price moves that far"
+        def band_total(buckets: Dict[float, float], is_ask: bool) -> float:
+            total = 0.0
+            for p, v in buckets.items():
+                dist = (p/price - 1) * 100 if is_ask else (1 - p/price) * 100
+                if 0 <= dist <= grab_pct:
+                    total += v
+            return total
+
+        up_grab_total   = band_total(ask_buckets, is_ask=True)
+        down_grab_total = band_total(bid_buckets, is_ask=False)
+
         lines = [
-            "🎯 <b>Major Liquidity Zones</b>",
-            "<i>Free order-book heatmap (Coinglass-style)</i>",
+            "🎯 <b>Extreme Liquidity Clusters</b>",
+            "<i>Free order-book heatmap (Coinglass-style) — outlier zones only</i>",
         ]
         if ask_zones:
             for p, v in ask_zones:
                 dist = (p/price - 1) * 100
-                lines.append(f"🔺 ${p:,.4f}  (+{dist:.2f}%)  {bar(v)} {self.fmt(v)}")
+                lines.append(f"🔺 ${p:,.4f}  (+{dist:.2f}%)  {bar(v)} ${self.fmt(v)}  {grab_note(dist)}")
         else:
-            lines.append("🔺 No major resistance data")
+            lines.append("🔺 No extreme resistance cluster found")
 
         lines.append(f"💵 ${price:,.4f} ← current price")
 
         if bid_zones:
             for p, v in bid_zones:
                 dist = (p/price - 1) * 100
-                lines.append(f"🔻 ${p:,.4f}  ({dist:.2f}%)  {bar(v)} {self.fmt(v)}")
+                lines.append(f"🔻 ${p:,.4f}  ({dist:.2f}%)  {bar(v)} ${self.fmt(v)}  {grab_note(dist)}")
         else:
-            lines.append("🔻 No major support data")
+            lines.append("🔻 No extreme support cluster found")
+
+        lines.append(
+            f"📌 +{grab_pct:.0f}% upar jaate hi ~${self.fmt(up_grab_total)} liquidity grab hogi"
+        )
+        lines.append(
+            f"📌 -{grab_pct:.0f}% neeche jaate hi ~${self.fmt(down_grab_total)} liquidity grab hogi"
+        )
         return lines
 
     # ── Funding Rate (separate block, own fetch/format) ──
@@ -633,7 +674,135 @@ class CompleteSentinelEngine:
                 return "Hidden Bear 🔻","🔴"
         return "No Divergence","⚪"
 
-    def calc_signal_score(self, rsi, mfi, trend_icon, div_lbl, struct_icon, obv_dir, vol_ratio) -> Tuple[int,str,str]:
+    # ── Advanced Indicators (SuperTrend / VWAP / Bollinger / ADX / StochRSI) ──
+    def calc_supertrend(self, h, l, c, period: int = 10, multiplier: float = 3.0):
+        h = np.asarray(h, dtype=float); l = np.asarray(l, dtype=float); c = np.asarray(c, dtype=float)
+        n = len(c)
+        if n < period * 2:
+            return 0.0, "⚪", "No Data", None
+        tr = np.zeros(n)
+        tr[0] = h[0] - l[0]
+        for i in range(1, n):
+            tr[i] = max(h[i]-l[i], abs(h[i]-c[i-1]), abs(l[i]-c[i-1]))
+        atr = np.zeros(n)
+        atr[:period] = np.mean(tr[:period])
+        for i in range(period, n):
+            atr[i] = (atr[i-1]*(period-1) + tr[i]) / period
+        hl2 = (h + l) / 2.0
+        basic_upper = hl2 + multiplier * atr
+        basic_lower = hl2 - multiplier * atr
+        final_upper = np.zeros(n); final_lower = np.zeros(n)
+        final_upper[0] = basic_upper[0]; final_lower[0] = basic_lower[0]
+        for i in range(1, n):
+            final_upper[i] = basic_upper[i] if (basic_upper[i] < final_upper[i-1] or c[i-1] > final_upper[i-1]) else final_upper[i-1]
+            final_lower[i] = basic_lower[i] if (basic_lower[i] > final_lower[i-1] or c[i-1] < final_lower[i-1]) else final_lower[i-1]
+        st = np.zeros(n); is_upper = np.zeros(n, dtype=bool)
+        st[0] = final_upper[0]; is_upper[0] = True
+        for i in range(1, n):
+            if is_upper[i-1] and c[i] <= final_upper[i]:
+                st[i] = final_upper[i]; is_upper[i] = True
+            elif is_upper[i-1] and c[i] > final_upper[i]:
+                st[i] = final_lower[i]; is_upper[i] = False
+            elif (not is_upper[i-1]) and c[i] >= final_lower[i]:
+                st[i] = final_lower[i]; is_upper[i] = False
+            else:
+                st[i] = final_upper[i]; is_upper[i] = True
+        bullish = not is_upper[-1]
+        return round(float(st[-1]), 8), ("🟢" if bullish else "🔴"), ("Bullish" if bullish else "Bearish"), bullish
+
+    def calc_vwap(self, h, l, c, v):
+        h = np.asarray(h, dtype=float); l = np.asarray(l, dtype=float)
+        c = np.asarray(c, dtype=float); v = np.asarray(v, dtype=float)
+        tp = (h + l + c) / 3.0
+        cum_v = np.cumsum(v)
+        vwap = float(np.cumsum(tp*v)[-1] / cum_v[-1]) if cum_v[-1] > 0 else float(c[-1])
+        above = c[-1] > vwap
+        return round(vwap, 8), ("🟢" if above else "🔴"), ("Price Above VWAP" if above else "Price Below VWAP")
+
+    def calc_bollinger(self, c, period: int = 20, num_std: float = 2.0):
+        c = np.asarray(c, dtype=float)
+        if len(c) < period:
+            return None
+        window = c[-period:]
+        mid = float(np.mean(window)); std = float(np.std(window))
+        upper = mid + num_std*std; lower = mid - num_std*std
+        price = float(c[-1])
+        bandwidth = (upper - lower) / mid if mid else 0.0
+        squeeze = False
+        if len(c) >= period * 3:
+            bw_hist = []
+            for i in range(period, len(c)):
+                w = c[i-period:i]
+                m = np.mean(w); s = np.std(w)
+                bw_hist.append(((m + num_std*s) - (m - num_std*s)) / m if m else 0.0)
+            recent = bw_hist[-20:]
+            avg_bw = float(np.mean(recent)) if recent else bandwidth
+            squeeze = bandwidth < avg_bw * 0.6
+        if price > upper:   pos = "Above Upper Band 🔴OB"
+        elif price < lower: pos = "Below Lower Band 🟢OS"
+        else:                pos = "Inside Bands ⚪"
+        return upper, mid, lower, pos, squeeze
+
+    def calc_adx(self, h, l, c, period: int = 14):
+        h = np.asarray(h, dtype=float); l = np.asarray(l, dtype=float); c = np.asarray(c, dtype=float)
+        n = len(c)
+        if n < period * 2 + 1:
+            return 0.0, "No Data ⚪"
+        up_move   = h[1:] - h[:-1]
+        down_move = l[:-1] - l[1:]
+        plus_dm   = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+        minus_dm  = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+        tr = np.maximum.reduce([h[1:]-l[1:], np.abs(h[1:]-c[:-1]), np.abs(l[1:]-c[:-1])])
+
+        def smooth(arr):
+            s = np.zeros(len(arr))
+            s[period-1] = np.sum(arr[:period])
+            for i in range(period, len(arr)):
+                s[i] = s[i-1] - (s[i-1]/period) + arr[i]
+            return s
+
+        atr_s      = smooth(tr)
+        plus_dm_s  = smooth(plus_dm)
+        minus_dm_s = smooth(minus_dm)
+        plus_di  = 100 * (plus_dm_s / (atr_s + 1e-9))
+        minus_di = 100 * (minus_dm_s / (atr_s + 1e-9))
+        dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-9)
+        start = period*2 - 1
+        if start >= len(dx):
+            return 0.0, "No Data ⚪"
+        adx = np.zeros(len(dx))
+        adx[start] = np.mean(dx[period-1:start+1])
+        for i in range(start+1, len(dx)):
+            adx[i] = (adx[i-1]*(period-1) + dx[i]) / period
+        val = round(float(adx[-1]), 2)
+        if val >= 50:   lbl = f"{val} 🔥 Very Strong Trend"
+        elif val >= 25: lbl = f"{val} 💪 Strong Trend"
+        else:            lbl = f"{val} 😴 Weak/Range"
+        return val, lbl
+
+    def calc_stoch_rsi(self, c, rsi_period: int = 14, stoch_period: int = 14, smooth_k: int = 3, smooth_d: int = 3):
+        c = np.asarray(c, dtype=float)
+        rsi_series = self.build_rsi_series(c, lookback=max(stoch_period + smooth_k + smooth_d + 10, 60))
+        if len(rsi_series) < stoch_period + smooth_k:
+            return 50.0, 50.0, "⚪ MID"
+        k_vals = []
+        for i in range(stoch_period-1, len(rsi_series)):
+            window = rsi_series[i-stoch_period+1:i+1]
+            lo, hi = np.min(window), np.max(window)
+            k_vals.append(100*(rsi_series[i]-lo)/(hi-lo) if hi > lo else 50.0)
+        k_vals = np.array(k_vals)
+        k_smooth = np.convolve(k_vals, np.ones(smooth_k)/smooth_k, mode='valid') if len(k_vals) >= smooth_k else k_vals
+        d_smooth = np.convolve(k_smooth, np.ones(smooth_d)/smooth_d, mode='valid') if len(k_smooth) >= smooth_d else k_smooth
+        k_final = round(float(k_smooth[-1]), 2) if len(k_smooth) else 50.0
+        d_final = round(float(d_smooth[-1]), 2) if len(d_smooth) else 50.0
+        if k_final >= 80:   lbl = "🔴 OB"
+        elif k_final <= 20: lbl = "🟢 OS"
+        else:                lbl = "⚪ MID"
+        return k_final, d_final, lbl
+
+    def calc_signal_score(self, rsi, mfi, trend_icon, div_lbl, struct_icon, obv_dir, vol_ratio,
+                           st_bull: Optional[bool] = None, stoch_k: Optional[float] = None,
+                           adx_val: Optional[float] = None) -> Tuple[int,str,str]:
         bull = 0; bear = 0
         if trend_icon  == "🟢": bull += 3
         elif trend_icon == "🔴": bear += 3
@@ -655,6 +824,16 @@ class CompleteSentinelEngine:
             bonus = min(2, int(vol_ratio//2))
             if bull >= bear: bull += bonus
             else: bear += bonus
+        # ── Advanced indicator contributions ──
+        if st_bull is True:   bull += 2
+        elif st_bull is False: bear += 2
+        if stoch_k is not None:
+            if stoch_k <= 20:  bull += 1
+            elif stoch_k >= 80: bear += 1
+        if adx_val is not None and adx_val >= 25:
+            # Strong trend (ADX) reinforces whichever side is already leading
+            if bull > bear: bull += 1
+            elif bear > bull: bear += 1
         total = bull + bear
         net   = bull - bear
         score = round((bull/total)*10) if total > 0 else 5
@@ -782,9 +961,18 @@ class CompleteSentinelEngine:
             struct_lbl, struct_icon = self.calc_market_structure(c_p)
             div_lbl,    div_icon    = self.calc_divergence(c_p)
             ema_line                = self.ema_structure(c_p, price)
+
+            # ── Advanced indicators (new) ──
+            st_val, st_icon, st_lbl, st_bull = self.calc_supertrend(pri['h'], pri['l'], c_p)
+            vwap_val, vwap_icon, vwap_lbl    = self.calc_vwap(pri['h'], pri['l'], c_p, pri['v'])
+            boll                             = self.calc_bollinger(c_p)
+            adx_val, adx_lbl                 = self.calc_adx(pri['h'], pri['l'], c_p)
+            k_val, d_val, stoch_lbl          = self.calc_stoch_rsi(c_p)
+
             score, sig_lbl, sig_icon = self.calc_signal_score(
                 pri['rsi'], pri['mfi'], trend_icon, div_lbl,
-                struct_icon, pri['obv_dir'], pri['ratio']
+                struct_icon, pri['obv_dir'], pri['ratio'],
+                st_bull=st_bull, stoch_k=k_val, adx_val=adx_val
             )
             lines += [
                 f"   📐 EMA (1h basis)",
@@ -793,6 +981,17 @@ class CompleteSentinelEngine:
                 f"   📈 TREND      : {trend_icon} {trend_lbl}",
                 f"   🏗  STRUCTURE  : {struct_icon} {struct_lbl}",
                 f"   🔀 DIVERGENCE : {div_icon} {div_lbl}",
+                D,
+                f"   🧭 ADVANCED INDICATORS",
+                f"   SuperTrend : {st_icon} {st_lbl} @ {st_val:,.5f}",
+                f"   VWAP       : {vwap_icon} {vwap_lbl} @ {vwap_val:,.5f}",
+            ]
+            if boll:
+                _, _, _, boll_pos, boll_squeeze = boll
+                lines.append(f"   BB(20,2)   : {boll_pos}" + ("  ⚠️ SQUEEZE" if boll_squeeze else ""))
+            lines += [
+                f"   ADX(14)    : {adx_lbl}",
+                f"   StochRSI   : K={k_val:.1f} D={d_val:.1f} {stoch_lbl}",
                 D,
                 f"   ⚡ SIGNAL  {score}/10  →  {sig_icon} {sig_lbl}",
             ]
