@@ -360,7 +360,8 @@ class CompleteSentinelEngine:
         spot        = {"options":{"defaultType":"spot"},"enableRateLimit":True,"timeout":15000}
         future_only = {"enableRateLimit":True,"timeout":15000}
 
-        # Multi-exchange routing — Binance intentionally EXCLUDED.
+        # Multi-exchange routing — Binance EXCLUDED from the main price/OHLCV
+        # routing below (fetch_exchange_data), as originally requested.
         # Each entry exposes a 'future' and 'spot' client so both routes are
         # attempted per exchange, same pattern as the original Gate/OKX pair.
         self.gate   = {'future': ccxt.gate(swap),   'spot': ccxt.gate(spot)}
@@ -370,8 +371,14 @@ class CompleteSentinelEngine:
         self.bitget = {'future': ccxt.bitget(swap), 'spot': ccxt.bitget(spot)}
         # KuCoin splits spot/futures into two separate ccxt classes.
         self.kucoin = {'future': ccxt.kucoinfutures(future_only), 'spot': ccxt.kucoin(future_only)}
+        # Binance — NOT used for price/OHLCV routing (many cloud hosts get
+        # geo/IP blocked by Binance). Kept only as a best-effort EXTRA
+        # source for the aggregated liquidity heatmap below: if it works
+        # from this server, great, more depth; if it 403/451s, it's just
+        # silently skipped like any other failed exchange call.
+        self.binance = {'future': ccxt.binance(swap), 'spot': ccxt.binance(spot)}
 
-        self._all_exchanges = [self.gate, self.okx, self.bybit, self.mexc, self.bitget, self.kucoin]
+        self._all_exchanges = [self.gate, self.okx, self.bybit, self.mexc, self.bitget, self.kucoin, self.binance]
 
         # FIX #4: bound concurrent exchange calls to avoid rate-limit storms
         self.scan_semaphore = asyncio.Semaphore(MAX_CONCURRENT_SCANS)
@@ -444,6 +451,59 @@ class CompleteSentinelEngine:
         return round(100 - 100/(1 + pos/neg), 2)
 
     # ── Major Liquidity Zones (simplified order-book read) ──
+    # ── Aggregated order book (multi-exchange, Binance best-effort) ──
+    async def fetch_aggregated_book(self, symbol: str, limit: int = 200):
+        """
+        Fetches order books from EVERY exchange we know about (spot + future
+        for each) and merges all bid/ask levels into one combined book —
+        this is what gets the heatmap closer to a real Coinglass-style
+        AGGREGATE view instead of a single exchange's snapshot.
+
+        Binance is included here as a best-effort extra source even though
+        it's excluded from the main price/OHLCV routing (fetch_exchange_data)
+        — if this server's IP isn't geo/IP-blocked by Binance it contributes
+        real depth, and if it is blocked it just fails silently like any
+        other exchange call and gets skipped, same as everything else.
+        """
+        mkt_swap = f"{symbol}:USDT"
+        sources = [
+            (self.gate['future'],    mkt_swap, "Gate-F"),
+            (self.gate['spot'],      symbol,   "Gate-S"),
+            (self.okx['future'],     mkt_swap, "OKX-F"),
+            (self.okx['spot'],       symbol,   "OKX-S"),
+            (self.bybit['future'],   mkt_swap, "Bybit-F"),
+            (self.bybit['spot'],     symbol,   "Bybit-S"),
+            (self.mexc['future'],    mkt_swap, "MEXC-F"),
+            (self.mexc['spot'],      symbol,   "MEXC-S"),
+            (self.bitget['future'],  mkt_swap, "Bitget-F"),
+            (self.bitget['spot'],    symbol,   "Bitget-S"),
+            (self.kucoin['future'],  mkt_swap, "KuCoin-F"),
+            (self.kucoin['spot'],    symbol,   "KuCoin-S"),
+            (self.binance['future'], mkt_swap, "Binance-F"),
+            (self.binance['spot'],   symbol,   "Binance-S"),
+        ]
+
+        async def fetch_one(client, mkt, label):
+            try:
+                book = await client.fetch_order_book(mkt, limit=limit)
+                return label, (book.get('bids') or []), (book.get('asks') or [])
+            except Exception as e:
+                log.debug(f"[AGG BOOK] {label} {symbol}: {e}")
+                return label, [], []
+
+        results = await asyncio.gather(*[fetch_one(c, m, l) for c, m, l in sources])
+
+        combined_bids: list = []
+        combined_asks: list = []
+        contributors: List[str] = []
+        for label, bids, asks in results:
+            if bids or asks:
+                contributors.append(label)
+                combined_bids.extend(bids)
+                combined_asks.extend(asks)
+
+        return combined_bids, combined_asks, contributors
+
     def calc_liquidity_heatmap(self, bids: list, asks: list, price: float, grab_pct: float = 10.0, source: Optional[str] = None) -> List[str]:
         """
         Free, Coinglass-style order-book liquidity heatmap — but filtered
@@ -454,14 +514,15 @@ class CompleteSentinelEngine:
         gives a total $ figure for how much liquidity sits inside that
         band on each side.
 
-        IMPORTANT CAVEAT: this reads ONE exchange's order book (whichever
-        exchange the price came from) — not an aggregate across every
-        exchange like a paid Coinglass feed. A low-cap/illiquid pair, or a
-        pair whose deepest liquidity venue isn't in our routing list
-        (e.g. Binance is intentionally excluded), can show much smaller
-        numbers here than what you'd see on an aggregated dashboard. The
-        diagnostic line below reports total raw book value we actually
-        saw, so a small number can be told apart from a real bug.
+        IMPORTANT CAVEAT: `bids`/`asks` here are expected to already be an
+        AGGREGATE across multiple exchanges (see fetch_aggregated_book) —
+        including Binance on a best-effort basis. Even so, a genuinely
+        low-cap/illiquid pair, or a pair where every reachable exchange's
+        book is thin (e.g. this server's IP is geo/IP-blocked on one or
+        more venues), can still show smaller numbers than a full paid
+        liquidation-data feed would. The diagnostic line below reports the
+        total raw book value we actually saw and which exchanges
+        contributed, so a small number can be told apart from a real bug.
         """
         bucket_size = max(price * 0.001, 1e-9)  # ~0.1% of price per bucket
 
@@ -530,7 +591,7 @@ class CompleteSentinelEngine:
         lines = [
             f"🎯 <b>Extreme Liquidity Clusters</b>{src_lbl}",
             "<i>Free order-book heatmap (Coinglass-style) — outlier zones only</i>",
-            f"<i>Book depth seen: 🔺${self.fmt(total_ask_depth)}  🔻${self.fmt(total_bid_depth)} (single-exchange snapshot)</i>",
+            f"<i>Book depth seen: 🔺${self.fmt(total_ask_depth)}  🔻${self.fmt(total_bid_depth)} (aggregated)</i>",
         ]
         if ask_zones:
             for p, v in ask_zones:
@@ -1025,15 +1086,13 @@ class CompleteSentinelEngine:
         # the <pre> block since it uses <b> tags for the header/price ──
         liq_lines = []
         try:
-            # FIX: was limit=50 — too shallow for mid/low-liquidity alts,
-            # meaning the top-50 levels often never reached out to the
-            # ±10% band at all. Bumped to 200 so the heatmap actually has
-            # a chance to see clusters further from price.
-            book = await client.fetch_order_book(mkt, limit=200)
-            bids = book.get('bids') or []
-            asks = book.get('asks') or []
-            if bids or asks:
-                liq_lines = self.calc_liquidity_heatmap(bids, asks, price, source=source)
+            # Aggregated across every exchange we know (incl. best-effort
+            # Binance) instead of just the one exchange that gave us price —
+            # closer to a real multi-exchange Coinglass-style view.
+            agg_bids, agg_asks, contributors = await self.fetch_aggregated_book(symbol)
+            if agg_bids or agg_asks:
+                src_label = ", ".join(contributors) if contributors else source
+                liq_lines = self.calc_liquidity_heatmap(agg_bids, agg_asks, price, source=src_label)
         except Exception as e:
             log.debug(f"[LIQ ZONES] {symbol} order book fetch failed: {e}")
 
