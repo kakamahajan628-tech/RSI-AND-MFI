@@ -444,7 +444,7 @@ class CompleteSentinelEngine:
         return round(100 - 100/(1 + pos/neg), 2)
 
     # ── Major Liquidity Zones (simplified order-book read) ──
-    def calc_liquidity_heatmap(self, bids: list, asks: list, price: float, grab_pct: float = 10.0) -> List[str]:
+    def calc_liquidity_heatmap(self, bids: list, asks: list, price: float, grab_pct: float = 10.0, source: Optional[str] = None) -> List[str]:
         """
         Free, Coinglass-style order-book liquidity heatmap — but filtered
         down to only the EXTREME clusters (statistical outliers vs the
@@ -453,6 +453,15 @@ class CompleteSentinelEngine:
         that size would already have swept/grabbed that liquidity), and
         gives a total $ figure for how much liquidity sits inside that
         band on each side.
+
+        IMPORTANT CAVEAT: this reads ONE exchange's order book (whichever
+        exchange the price came from) — not an aggregate across every
+        exchange like a paid Coinglass feed. A low-cap/illiquid pair, or a
+        pair whose deepest liquidity venue isn't in our routing list
+        (e.g. Binance is intentionally excluded), can show much smaller
+        numbers here than what you'd see on an aggregated dashboard. The
+        diagnostic line below reports total raw book value we actually
+        saw, so a small number can be told apart from a real bug.
         """
         bucket_size = max(price * 0.001, 1e-9)  # ~0.1% of price per bucket
 
@@ -510,9 +519,18 @@ class CompleteSentinelEngine:
             v for p, v in bid_zones if (1 - p/price) * 100 <= grab_pct + EPS
         )
 
+        # Diagnostic — total raw $ visible across ALL fetched levels (before
+        # outlier filtering), plus which exchange this book came from. This
+        # is what tells you "genuinely thin book on this venue" apart from
+        # "something's broken."
+        total_ask_depth = sum(ask_buckets.values())
+        total_bid_depth = sum(bid_buckets.values())
+        src_lbl = f" [{esc(source)}]" if source else ""
+
         lines = [
-            "🎯 <b>Extreme Liquidity Clusters</b>",
+            f"🎯 <b>Extreme Liquidity Clusters</b>{src_lbl}",
             "<i>Free order-book heatmap (Coinglass-style) — outlier zones only</i>",
+            f"<i>Book depth seen: 🔺${self.fmt(total_ask_depth)}  🔻${self.fmt(total_bid_depth)} (single-exchange snapshot)</i>",
         ]
         if ask_zones:
             for p, v in ask_zones:
@@ -1007,11 +1025,15 @@ class CompleteSentinelEngine:
         # the <pre> block since it uses <b> tags for the header/price ──
         liq_lines = []
         try:
-            book = await client.fetch_order_book(mkt, limit=50)
+            # FIX: was limit=50 — too shallow for mid/low-liquidity alts,
+            # meaning the top-50 levels often never reached out to the
+            # ±10% band at all. Bumped to 200 so the heatmap actually has
+            # a chance to see clusters further from price.
+            book = await client.fetch_order_book(mkt, limit=200)
             bids = book.get('bids') or []
             asks = book.get('asks') or []
             if bids or asks:
-                liq_lines = self.calc_liquidity_heatmap(bids, asks, price)
+                liq_lines = self.calc_liquidity_heatmap(bids, asks, price, source=source)
         except Exception as e:
             log.debug(f"[LIQ ZONES] {symbol} order book fetch failed: {e}")
 
