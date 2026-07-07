@@ -72,18 +72,6 @@ PORT = int(os.environ.get("PORT", "10000"))
 # when the tracked coin list is large. Also reduces odds of IP bans.
 MAX_CONCURRENT_SCANS = int(os.environ.get("MAX_CONCURRENT_SCANS", "5"))
 
-# ENGINE RUNTIME STATE MATRIX
-# FIX #5: on a fresh process boot, resume whatever state was last saved
-# (so a Render restart/spin-down doesn't silently leave the bot asleep
-# until someone notices and sends /start again). db_init() runs in the
-# lifespan handler before this is read, so the table always exists by then;
-# we still guard here in case this module is imported before lifespan runs.
-try:
-    db_init()
-    is_engine_active = db_load_engine_active()
-except Exception:
-    is_engine_active = False
-
 log.info(f"[ENV MATRIX] TELEGRAM_TOKEN  = {'VALID ✅' if TELEGRAM_TOKEN else 'CRITICAL MISSING ❌'}")
 log.info(f"[ENV MATRIX] RAW CHAT_ID      = '{RAW_CHAT_ID}'")
 log.info(f"[ENV MATRIX] PARSED CHAT_ID   = {ALLOWED_CHAT_ID if ALLOWED_CHAT_ID else 'CRITICAL MISSING ❌'}")
@@ -141,6 +129,18 @@ def db_save_engine_active(active: bool):
     con.execute("UPDATE engine_state SET value=? WHERE key='is_active'", ("1" if active else "0",))
     con.commit(); con.close()
 
+# ENGINE RUNTIME STATE MATRIX
+# FIX #5: on a fresh process boot, resume whatever state was last saved
+# (so a Render restart/spin-down doesn't silently leave the bot asleep
+# until someone notices and sends /start again). Runs here — after the
+# db_* functions above are actually defined — so it no longer raises a
+# silent NameError and always falls back to False.
+try:
+    db_init()
+    is_engine_active = db_load_engine_active()
+except Exception:
+    is_engine_active = False
+
 # ================================================================
 # TELEGRAM — async httpx + queue
 # ================================================================
@@ -187,7 +187,10 @@ def esc(text: str) -> str:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global engine_instance, _tg_queue, _http
-    db_init()
+    # NOTE: db_init() already runs once at module import time (top-level
+    # try/except above). Calling it again here was redundant and could
+    # race with that first open under SQLite's single-writer behavior on
+    # some cloud/multi-worker setups — so it's intentionally not repeated.
     _tg_queue       = asyncio.Queue(maxsize=500)
     _http           = httpx.AsyncClient()
     engine_instance = CompleteSentinelEngine()
