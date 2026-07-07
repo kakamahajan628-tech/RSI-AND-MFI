@@ -353,17 +353,31 @@ class CompleteSentinelEngine:
         # FIX #6: explicit timeout (ms). Without this, a stalled network call
         # to an exchange can hang indefinitely and freeze the whole scan,
         # since it never raises and never frees up its semaphore slot.
-        swap = {"options":{"defaultType":"swap"},"enableRateLimit":True,"timeout":15000}
-        spot = {"options":{"defaultType":"spot"},"enableRateLimit":True,"timeout":15000}
-        self.gate = {'future': ccxt.gate(swap), 'spot': ccxt.gate(spot)}
-        self.okx  = {'future': ccxt.okx(swap),  'spot': ccxt.okx(spot)}
+        swap        = {"options":{"defaultType":"swap"},"enableRateLimit":True,"timeout":15000}
+        spot        = {"options":{"defaultType":"spot"},"enableRateLimit":True,"timeout":15000}
+        future_only = {"enableRateLimit":True,"timeout":15000}
+
+        # Multi-exchange routing — Binance intentionally EXCLUDED.
+        # Each entry exposes a 'future' and 'spot' client so both routes are
+        # attempted per exchange, same pattern as the original Gate/OKX pair.
+        self.gate   = {'future': ccxt.gate(swap),   'spot': ccxt.gate(spot)}
+        self.okx    = {'future': ccxt.okx(swap),    'spot': ccxt.okx(spot)}
+        self.bybit  = {'future': ccxt.bybit(swap),  'spot': ccxt.bybit(spot)}
+        self.mexc   = {'future': ccxt.mexc(swap),   'spot': ccxt.mexc(spot)}
+        self.bitget = {'future': ccxt.bitget(swap), 'spot': ccxt.bitget(spot)}
+        # KuCoin splits spot/futures into two separate ccxt classes.
+        self.kucoin = {'future': ccxt.kucoinfutures(future_only), 'spot': ccxt.kucoin(future_only)}
+
+        self._all_exchanges = [self.gate, self.okx, self.bybit, self.mexc, self.bitget, self.kucoin]
+
         # FIX #4: bound concurrent exchange calls to avoid rate-limit storms
         self.scan_semaphore = asyncio.Semaphore(MAX_CONCURRENT_SCANS)
 
     async def close_clients(self):
-        for c in list(self.gate.values()) + list(self.okx.values()):
-            try: await c.close()
-            except Exception as e: log.warning(f"[CLOSE] {e}")
+        for pair in self._all_exchanges:
+            for c in pair.values():
+                try: await c.close()
+                except Exception as e: log.warning(f"[CLOSE] {e}")
 
     def add_coin(self, s: str):
         s = s.upper().strip()
@@ -429,11 +443,12 @@ class CompleteSentinelEngine:
     # ── Major Liquidity Zones (simplified order-book read) ──
     def calc_liquidity_heatmap(self, bids: list, asks: list, price: float) -> List[str]:
         """
-        Simple, phone-friendly view of where the real liquidity is sitting.
-        Groups raw order-book levels into small price buckets, ranks the
-        buckets by total value, and just reports the top 2 zones above
-        price (resistance) and top 2 below price (support) — no bars,
-        no bands, just the price levels that matter.
+        Free, Coinglass-style order-book liquidity heatmap. Groups raw
+        order-book levels into small price buckets, ranks the buckets by
+        total value, and reports the top 3 zones above price (resistance)
+        and top 3 below price (support) with a block-bar showing relative
+        intensity — same idea as Coinglass's heatmap, built entirely from
+        free public order-book data (no paid liquidation-data feed).
         """
         bucket_size = max(price * 0.001, 1e-9)  # ~0.1% of price per bucket
 
@@ -445,7 +460,7 @@ class CompleteSentinelEngine:
                 value  = lvl_price * amount
                 bucket = round(lvl_price / bucket_size) * bucket_size
                 buckets[bucket] = buckets.get(bucket, 0.0) + value
-            top = sorted(buckets.items(), key=lambda x: -x[1])[:2]
+            top = sorted(buckets.items(), key=lambda x: -x[1])[:3]
             return sorted(top, key=lambda x: x[0])
 
         ask_zones = cluster(asks)  # resistance, above price
@@ -453,11 +468,20 @@ class CompleteSentinelEngine:
         ask_zones.sort(key=lambda x: x[0])           # nearest resistance first
         bid_zones.sort(key=lambda x: x[0], reverse=True)  # nearest support first
 
-        lines = ["🎯 <b>Major Liquidity Zones</b>"]
+        max_val = max([v for _, v in ask_zones + bid_zones] + [1.0])
+
+        def bar(v: float) -> str:
+            blocks = int(round((v / max_val) * 10)) if max_val > 0 else 0
+            return "█" * max(1, min(10, blocks))
+
+        lines = [
+            "🎯 <b>Major Liquidity Zones</b>",
+            "<i>Free order-book heatmap (Coinglass-style)</i>",
+        ]
         if ask_zones:
             for p, v in ask_zones:
                 dist = (p/price - 1) * 100
-                lines.append(f"🔺 ${p:,.4f}  (+{dist:.2f}%)  {self.fmt(v)}")
+                lines.append(f"🔺 ${p:,.4f}  (+{dist:.2f}%)  {bar(v)} {self.fmt(v)}")
         else:
             lines.append("🔺 No major resistance data")
 
@@ -466,9 +490,55 @@ class CompleteSentinelEngine:
         if bid_zones:
             for p, v in bid_zones:
                 dist = (p/price - 1) * 100
-                lines.append(f"🔻 ${p:,.4f}  ({dist:.2f}%)  {self.fmt(v)}")
+                lines.append(f"🔻 ${p:,.4f}  ({dist:.2f}%)  {bar(v)} {self.fmt(v)}")
         else:
             lines.append("🔻 No major support data")
+        return lines
+
+    # ── Funding Rate (separate block, own fetch/format) ──
+    async def fetch_funding_info(self, symbol: str):
+        """
+        Tries each futures-capable exchange (Binance excluded) in turn
+        until one returns a funding rate. Returns (rate, next_funding_dt,
+        source_label) or (None, None, None) if nobody has data for it.
+        """
+        mkt = f"{symbol}:USDT"
+        futures_clients = [
+            (self.gate['future'],   "Gate"),
+            (self.okx['future'],    "OKX"),
+            (self.bybit['future'],  "Bybit"),
+            (self.mexc['future'],   "MEXC"),
+            (self.bitget['future'], "Bitget"),
+            (self.kucoin['future'], "KuCoin"),
+        ]
+        for client, label in futures_clients:
+            try:
+                fr = await client.fetch_funding_rate(mkt)
+                if fr and fr.get('fundingRate') is not None:
+                    rate    = float(fr['fundingRate'])
+                    next_ts = fr.get('nextFundingTimestamp') or fr.get('fundingTimestamp')
+                    next_dt = datetime.fromtimestamp(next_ts/1000, tz=timezone.utc) if next_ts else None
+                    return rate, next_dt, label
+            except Exception as e:
+                log.debug(f"[FUNDING] {label} {symbol}: {e}")
+        return None, None, None
+
+    def fmt_funding_block(self, rate: Optional[float], next_dt, source: Optional[str]) -> List[str]:
+        lines = ["💸 <b>Funding Rate</b>"]
+        if rate is None:
+            lines.append("⚪ No funding data available")
+            return lines
+        pct  = rate * 100
+        icon = "🟢" if pct >= 0 else "🔴"
+        lines.append(f"{icon} Rate: {pct:+.4f}%  ({esc(source)})")
+        if next_dt:
+            remaining = next_dt - datetime.now(timezone.utc)
+            secs = max(0, int(remaining.total_seconds()))
+            h, rem = divmod(secs, 3600)
+            m, _   = divmod(rem, 60)
+            lines.append(f"⏱ Next in: {h}h {m}m  ({next_dt.strftime('%H:%M UTC')})")
+        else:
+            lines.append("⏱ Next funding time unavailable")
         return lines
 
     def calc_obv(self, c: np.ndarray, v: np.ndarray) -> Tuple[float, str]:
@@ -619,10 +689,18 @@ class CompleteSentinelEngine:
 
     async def fetch_exchange_data(self, symbol: str):
         attempts = [
-            (self.gate['future'], f"{symbol}:USDT", "Gate (FUTURE)"),
-            (self.okx['future'],  f"{symbol}:USDT", "OKX (FUTURE)"),
-            (self.gate['spot'],   symbol,            "Gate (SPOT)"),
-            (self.okx['spot'],    symbol,            "OKX (SPOT)"),
+            (self.gate['future'],   f"{symbol}:USDT", "Gate (FUTURE)"),
+            (self.okx['future'],    f"{symbol}:USDT", "OKX (FUTURE)"),
+            (self.bybit['future'],  f"{symbol}:USDT", "Bybit (FUTURE)"),
+            (self.mexc['future'],   f"{symbol}:USDT", "MEXC (FUTURE)"),
+            (self.bitget['future'], f"{symbol}:USDT", "Bitget (FUTURE)"),
+            (self.kucoin['future'], f"{symbol}:USDT", "KuCoin (FUTURE)"),
+            (self.gate['spot'],     symbol,            "Gate (SPOT)"),
+            (self.okx['spot'],      symbol,            "OKX (SPOT)"),
+            (self.bybit['spot'],    symbol,            "Bybit (SPOT)"),
+            (self.mexc['spot'],     symbol,            "MEXC (SPOT)"),
+            (self.bitget['spot'],   symbol,            "Bitget (SPOT)"),
+            (self.kucoin['spot'],   symbol,            "KuCoin (SPOT)"),
         ]
         for client, mkt, label in attempts:
             try:
@@ -732,9 +810,19 @@ class CompleteSentinelEngine:
         except Exception as e:
             log.debug(f"[LIQ ZONES] {symbol} order book fetch failed: {e}")
 
+        # ── Funding rate block (order-book se alag, apna khud ka block) ──
+        funding_lines = []
+        try:
+            f_rate, f_next_dt, f_source = await self.fetch_funding_info(symbol)
+            funding_lines = self.fmt_funding_block(f_rate, f_next_dt, f_source)
+        except Exception as e:
+            log.debug(f"[FUNDING] {symbol} fetch failed: {e}")
+
         html = f"<pre>{html_body}</pre>"
         if liq_lines:
             html += "\n" + "\n".join(liq_lines)
+        if funding_lines:
+            html += "\n" + "\n".join(funding_lines)
         html += f"\n{D2}"
         return html, score, sig_lbl
 
