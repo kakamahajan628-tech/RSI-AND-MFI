@@ -493,23 +493,22 @@ class CompleteSentinelEngine:
             blocks = int(round((v / max_val) * 10)) if max_val > 0 else 0
             return "█" * max(1, min(10, blocks))
 
+        EPS = 1e-6  # floating-point tolerance so an exact 10.0% boundary isn't excluded by rounding noise
+
         def grab_note(dist_pct: float) -> str:
             return (f"⚠️ within {grab_pct:.0f}% — grab risk"
-                    if abs(dist_pct) <= grab_pct else
+                    if abs(dist_pct) <= grab_pct + EPS else
                     f"🛡️ {abs(dist_pct):.1f}% away")
 
-        # total $ sitting inside the ±grab_pct% band on each side — this is
-        # "how much liquidity gets swept if price moves that far"
-        def band_total(buckets: Dict[float, float], is_ask: bool) -> float:
-            total = 0.0
-            for p, v in buckets.items():
-                dist = (p/price - 1) * 100 if is_ask else (1 - p/price) * 100
-                if 0 <= dist <= grab_pct:
-                    total += v
-            return total
-
-        up_grab_total   = band_total(ask_buckets, is_ask=True)
-        down_grab_total = band_total(bid_buckets, is_ask=False)
+        # Sum only the EXTREME clusters actually shown above that also sit
+        # inside the ±grab_pct% band — i.e. "if price moves this much, this
+        # much of the liquidity you can see above/below gets swept."
+        up_grab_total = sum(
+            v for p, v in ask_zones if (p/price - 1) * 100 <= grab_pct + EPS
+        )
+        down_grab_total = sum(
+            v for p, v in bid_zones if (1 - p/price) * 100 <= grab_pct + EPS
+        )
 
         lines = [
             "🎯 <b>Extreme Liquidity Clusters</b>",
@@ -531,12 +530,16 @@ class CompleteSentinelEngine:
         else:
             lines.append("🔻 No extreme support cluster found")
 
-        lines.append(
-            f"📌 +{grab_pct:.0f}% upar jaate hi ~${self.fmt(up_grab_total)} liquidity grab hogi"
-        )
-        lines.append(
-            f"📌 -{grab_pct:.0f}% neeche jaate hi ~${self.fmt(down_grab_total)} liquidity grab hogi"
-        )
+        # Only show the summary note when there's actually something inside
+        # the band on that side — no more "~$0.00" noise every scan.
+        if up_grab_total > 0:
+            lines.append(
+                f"📌 Note: price +{grab_pct:.0f}% upar jaate hi total ~${self.fmt(up_grab_total)} liquidity grab ho jayegi"
+            )
+        if down_grab_total > 0:
+            lines.append(
+                f"📌 Note: price -{grab_pct:.0f}% neeche jaate hi total ~${self.fmt(down_grab_total)} liquidity grab ho jayegi"
+            )
         return lines
 
     # ── Funding Rate (separate block, own fetch/format) ──
